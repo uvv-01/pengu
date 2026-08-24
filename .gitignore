@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+*.whl
+*.manifest
+*.spec
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# Secrets - NEVER commit these
+.env
+.env.local
+.env.production
+*.pem
+*.key
+secrets.json
+credentials.json
+api_keys.json
+
+# Data
+*.db
+*.sqlite
+*.sqlite3
+
+# Models (large files, download separately)
+models/*.bin
+models/*.onnx
+models/*.gguf
+models/*.safetensors
+models/*.pt
+models/*.pth
+models/*.ckpt
+
+# Logs
+*.log
+logs/
+
+# Cache
+.cache/
+*.tmp
+*.temp
+
+# Node (for Electron later)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnp.*
+.next
+out/
+
+# Pytest
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Mypy
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
+
+# Results
+results/
+
+# Freebuff internal
+.freebuff/

@@ -1,0 +1,119 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pengu"
+version = "0.1.0"
+description = "₹0-cost local-first autonomous desktop assistant"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Pengu Contributors"},
+]
+keywords = [
+    "assistant",
+    "voice",
+    "local-ai",
+    "desktop",
+    "windows",
+    "wake-word",
+    "local-first",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # Web framework
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    # Configuration
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "PyYAML>=6.0",
+    # Hardware detection
+    "psutil>=5.9.0",
+    # Structured logging
+    "structlog>=23.2.0",
+    # Database (memory)
+    "aiosqlite>=0.19.0",
+    # HTTP client (for optional cloud providers)
+    "httpx>=0.25.0",
+    # Audio processing (wake word + STT)
+    "sounddevice>=0.4.6",
+    "numpy>=1.24.0",
+    # Process management
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+# Voice stack (install when ready)
+voice = [
+    "openwakeword>=0.6.0",
+    "faster-whisper>=1.0.0",
+    "kokoro>=0.7.0",
+]
+# Local LLM via Ollama (install when ready)
+llm = [
+    "ollama>=0.4.0",
+]
+# Browser automation (install when ready)
+browser = [
+    "playwright>=1.40.0",
+]
+# GUI automation (install when ready)
+gui = [
+    "pyautogui>=0.9.54",
+]
+# Development
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.7.0",
+]
+all = [
+    "pengu[voice,llm,browser,gui,dev]",
+]
+
+[project.scripts]
+pengu = "pengu.cli:main"
+pengu-hw = "pengu.hardware.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pengu*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
