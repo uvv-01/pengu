@@ -19,6 +19,44 @@
 
 ---
 
+## Actual Runtime (Day 2)
+
+> The Day 1 Ollama recommendations were provisional. LM Studio is already installed on this machine with a working model. It was selected as the primary runtime.
+
+| Role | Model | Provider | Runtime | Local? | Cost | License | HW Tier | Status |
+|------|-------|----------|---------|--------|------|---------|---------|--------|
+| General LLM | google/gemma-4-e4b (7.5B) | LM Studio | LM Studio API | Yes | Free | Gemma Terms of Use | MEDIUM | IMPLEMENTED |
+| Coding LLM | (Day 3+) | — | — | — | — | — | — | NOT IMPLEMENTED |
+| Vision LLM | (Day 3+) | — | — | — | — | — | — | NOT IMPLEMENTED |
+| STT | (Day 4+) | — | — | — | — | — | — | NOT IMPLEMENTED |
+| TTS | (Day 5+) | — | — | — | — | — | — | NOT IMPLEMENTED |
+| Wake Word | (Day 5+) | — | — | — | — | — | — | NOT IMPLEMENTED |
+| Cloud | (Future) | — | — | — | — | — | — | NOT IMPLEMENTED |
+
+### LM Studio Runtime Details
+
+**MODEL:** google/gemma-4-e4b
+**SOURCE:** Google DeepMind / LM Studio
+**OFFICIAL URL:** https://lmstudio.ai
+**LICENSE:** Gemma Terms of Use (free for personal and commercial use)
+**LOCAL/CLOUD:** Local (100% on-device)
+**COST:** Free — runs entirely on local hardware
+**MINIMUM PRACTICAL HARDWARE:** 8 GB RAM, CPU-only
+**RECOMMENDED HARDWARE:** 16 GB RAM
+**RUNTIME:** LM Studio (OpenAI-compatible API at localhost:1234)
+**ACTUAL PERFORMANCE:** ~7-30 seconds per response on CPU (no GPU)
+**WHY SELECTED:**
+  - Already installed on this machine
+  - OpenAI-compatible API (easy integration via httpx)
+  - No additional installation needed
+  - Works on CPU without GPU
+  - Free license
+**ALTERNATIVES:**
+  - Ollama + qwen2.5:7b — would be faster but requires installation
+  - Ollama + qwen2.5:3b — smaller, faster on CPU
+
+---
+
 ## Selected Model Details
 
 ### General LLM: Qwen 2.5
