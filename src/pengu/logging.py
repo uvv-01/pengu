@@ -98,21 +98,20 @@ class AuditLogger:
         result: str = "",
     ) -> None:
         self._logger.info(
-            "tool_execution",
-            tool=tool_name,
-            permission_level=permission_level,
-            granted=granted,
-            params_keys=list(params.keys()),
-            result=result[:200] if result else "",
-            task_id=get_task_id(),
+            "tool_execution tool=%s permission=%d granted=%s task_id=%s result=%s",
+            tool_name,
+            permission_level,
+            granted,
+            get_task_id(),
+            result[:200] if result else "",
         )
 
     def log_state_transition(self, from_state: str, to_state: str) -> None:
         self._logger.info(
-            "state_transition",
-            from_state=from_state,
-            to_state=to_state,
-            task_id=get_task_id(),
+            "state_transition from=%s to=%s task_id=%s",
+            from_state,
+            to_state,
+            get_task_id(),
         )
 
     def log_provider_call(
@@ -124,13 +123,13 @@ class AuditLogger:
         error: str = "",
     ) -> None:
         self._logger.info(
-            "provider_call",
-            provider=provider,
-            model=model,
-            success=success,
-            duration_ms=round(duration_ms, 2),
-            error=error[:200] if error else "",
-            task_id=get_task_id(),
+            "provider_call provider=%s model=%s success=%s duration=%.2fms task_id=%s error=%s",
+            provider,
+            model,
+            success,
+            duration_ms,
+            get_task_id(),
+            error[:200] if error else "",
         )
 
 

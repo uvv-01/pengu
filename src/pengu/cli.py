@@ -58,15 +58,15 @@ def main() -> None:
         )
 
         print(f"""
-  ╔════════════════════════════════════════╗
-  ║           PENGU  v{config.version}              ║
-  ║   ₹0 Local-First Desktop Assistant    ║
-  ╠════════════════════════════════════════╣
-  ║  Cost Mode:  {config.cost_mode.value:<24s} ║
-  ║  Host:       {config.api.host:<24s} ║
-  ║  Port:       {config.api.port:<24d} ║
-  ║  Debug:      {str(config.debug):<24s} ║
-  ╚════════════════════════════════════════╝
+  +------------------------------------------+
+  |           PENGU  v{config.version}              |
+  |   0-cost Local-First Desktop Assistant   |
+  +------------------------------------------+
+  |  Cost Mode:  {config.cost_mode.value:<24s} |
+  |  Host:       {config.api.host:<24s} |
+  |  Port:       {config.api.port:<24d} |
+  |  Debug:      {str(config.debug):<24s} |
+  +------------------------------------------+
         """)
 
         uvicorn.run(

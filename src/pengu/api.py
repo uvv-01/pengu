@@ -8,7 +8,10 @@ Endpoints:
   GET  /hardware      — hardware detection report
   GET  /state         — current assistant state
   GET  /tools         — registered tools
+  GET  /provider      — model provider status
   POST /command       — send a text command
+  POST /activate      — wake up Pengu
+  POST /cancel        — emergency stop
   WS   /ws            — WebSocket for live state updates
 
 Default: 127.0.0.1:8420
@@ -22,12 +25,15 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from pengu.config import PenguConfig, AssistantState, get_config
 from pengu.hardware.detect import detect_hardware, HardwareInfo
 from pengu.logging import get_logger, setup_logging, new_task_id
+from pengu.models.base import ModelProvider
+from pengu.models.lmstudio import LMStudioProvider
+from pengu.pipeline import CommandPipeline, get_pipeline
 from pengu.state import AssistantStateMachine
+from pengu.tools.deterministic import register_deterministic_tools
 from pengu.tools.registry import ToolRegistry
 
 logger = get_logger("pengu.api")
@@ -40,6 +46,8 @@ _config: PenguConfig | None = None
 _state_machine = AssistantStateMachine()
 _tool_registry = ToolRegistry()
 _hardware_info: HardwareInfo | None = None
+_provider: ModelProvider | None = None
+_pipeline: CommandPipeline | None = None
 _connected_websockets: list[WebSocket] = []
 
 
@@ -57,13 +65,21 @@ def get_hardware_cached() -> HardwareInfo:
     return _hardware_info
 
 
+def get_provider() -> ModelProvider | None:
+    return _provider
+
+
+def get_command_pipeline() -> CommandPipeline | None:
+    return _pipeline
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="Pengu",
-    description="₹0-cost local-first autonomous desktop assistant",
+    description="£0-cost local-first autonomous desktop assistant",
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -83,6 +99,8 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup() -> None:
+    global _provider, _pipeline
+
     config = get_config_cached()
     setup_logging(
         level="DEBUG" if config.debug else "INFO",
@@ -103,11 +121,40 @@ async def startup() -> None:
         gpu=hw.gpu.name,
     )
 
+    # Register deterministic tools
+    register_deterministic_tools(_tool_registry)
+    logger.info(
+        "tools_registered",
+        count=len(_tool_registry.list_tools()),
+    )
+
+    # Initialize LM Studio provider
+    lmstudio = LMStudioProvider()
+    provider_healthy = await lmstudio.health_check()
+    if provider_healthy:
+        _provider = lmstudio
+        logger.info(
+            "lmstudio_connected",
+            base_url=lmstudio.base_url,
+        )
+    else:
+        logger.warning(
+            "lmstudio_unavailable",
+            error=lmstudio.health.error,
+        )
+
+    # Initialize command pipeline
+    _pipeline = CommandPipeline(_tool_registry, _provider)
+    logger.info("pipeline_initialized")
+
     logger.info("pengu_ready", port=config.api.port)
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    global _provider
+    if _provider and isinstance(_provider, LMStudioProvider):
+        await _provider.close()
     logger.info("pengu_stopping")
 
 
@@ -148,6 +195,8 @@ async def root() -> dict[str, Any]:
         "state": _state_machine.state.value,
         "cost_mode": config.cost_mode.value,
         "hardware_tier": hw.tier.value,
+        "provider": _provider.name if _provider else "none",
+        "tools_count": len(_tool_registry.list_tools()),
         "endpoints": {
             "docs": "/docs",
             "health": "/health",
@@ -155,6 +204,7 @@ async def root() -> dict[str, Any]:
             "hardware": "/hardware",
             "state": "/state",
             "tools": "/tools",
+            "provider": "/provider",
             "command": "/command",
             "websocket": "/ws",
         },
@@ -169,6 +219,8 @@ async def health() -> dict[str, Any]:
         "version": config.version,
         "cost_mode": config.cost_mode.value,
         "cloud_enabled": config.cloud_enabled(),
+        "provider": _provider.name if _provider else "none",
+        "provider_healthy": _provider.health.available if _provider else False,
     }
 
 
@@ -199,49 +251,75 @@ async def tools() -> dict[str, Any]:
     return _tool_registry.to_dict()
 
 
+@app.get("/provider")
+async def provider() -> dict[str, Any]:
+    """Show model provider status."""
+    if _provider is None:
+        return {
+            "available": False,
+            "name": "none",
+            "error": "No model provider configured",
+            "suggestion": "Load a model in LM Studio (http://localhost:1234)",
+        }
+
+    return {
+        "available": _provider.health.available,
+        "name": _provider.name,
+        "type": _provider.provider_type.value,
+        "health": _provider.health.to_dict(),
+    }
+
+
 @app.post("/command")
 async def command(payload: dict[str, Any]) -> dict[str, Any]:
     """
     Send a text command to Pengu.
 
-    Body: {"text": "open VS Code", "user_id": "optional"}
+    Body: {"text": "open VS Code"}
     """
     text = payload.get("text", "").strip()
     if not text:
         return {"error": "No command text provided"}
 
     task_id = new_task_id()
-    logger.info("command_received", text=text, task_id=task_id)
 
-    # For Day 1: echo back with state info
-    # Day 2+ will route through the actual intent pipeline
     try:
-        await _state_machine.activate()
-        await _state_machine.start_listening()
-        await _state_machine.think()
+        # Route through the real pipeline
+        if _pipeline:
+            result = await _pipeline.process(text, task_id=task_id)
 
-        # Day 1: deterministic response
-        response_text = f"Received: '{text}'. Intent routing not yet implemented (Day 2)."
+            response_data = {
+                "task_id": task_id,
+                "input": text,
+                "response": result.response,
+                "category": result.intent.category.value,
+                "confidence": result.intent.confidence,
+                "method": result.intent.method,
+                "provider": result.provider,
+                "model": result.model,
+                "tool_used": result.tool_used,
+                "latency_ms": round(result.latency_ms, 2),
+                "steps": result.steps,
+            }
 
-        await _state_machine.execute()
-        await _state_machine.speak()
-        await _state_machine.complete()
+            if result.error:
+                response_data["error_detail"] = result.error
 
-        return {
-            "task_id": task_id,
-            "input": text,
-            "response": response_text,
-            "provider": "deterministic",
-            "model": "none",
-            "state": _state_machine.state.value,
-        }
+            return response_data
+        else:
+            return {
+                "task_id": task_id,
+                "input": text,
+                "error": "Pipeline not initialized",
+            }
+
     except Exception as e:
-        await _state_machine.error(str(e))
+        import traceback
+        traceback.print_exc()
         return {
             "task_id": task_id,
             "input": text,
             "error": str(e),
-            "state": _state_machine.state.value,
         }
 
 
@@ -250,6 +328,7 @@ async def activate() -> dict[str, Any]:
     """Manually activate Pengu (as if wake word was detected)."""
     try:
         await _state_machine.activate()
+        await broadcast_state()
         return {
             "state": _state_machine.state.value,
             "task_id": _state_machine.task_id,
@@ -263,6 +342,7 @@ async def activate() -> dict[str, Any]:
 async def cancel() -> dict[str, Any]:
     """Emergency cancel (Ctrl+Shift+P equivalent)."""
     await _state_machine.cancel()
+    await broadcast_state()
     return {
         "state": _state_machine.state.value,
         "message": "Emergency cancel issued.",
