@@ -241,13 +241,102 @@ class CommandPipeline:
     async def _handle_system_control(
         self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
     ) -> PipelineResult:
-        """Handle system control (open/close/focus apps)."""
+        """Handle system control (open/close/focus apps, system info, processes)."""
         action = intent.extracted_action
         target = intent.extracted_target
 
         steps.append({"step": "system_control", "action": action, "target": target, "status": "running"})
 
-        # Special case: VS Code with project/folder
+        # --- Is something running? ---
+        import re
+        is_running_match = re.search(
+            r"\b(is|are)\s+(.+?)\s+(running|open|alive)\b", text, re.IGNORECASE
+        )
+        if is_running_match:
+            app_name = is_running_match.group(2).strip()
+            tool_result = await self.tool_registry.execute(
+                "application.is_running", application=app_name
+            )
+            if tool_result.success:
+                data = tool_result.output
+                running = data.get("running", False)
+                count = data.get("process_count", 0)
+                if running:
+                    status = f"Yes, {app_name} is running ({count} process{'es' if count != 1 else ''})."
+                else:
+                    status = f"No, {app_name} is not running."
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent, response=status,
+                    provider="deterministic", tool_used="application.is_running",
+                    tool_result=tool_result,
+                )
+
+        # --- System info ---
+        if action == "system_info":
+            tool_result = await self.tool_registry.execute("system.info")
+            if tool_result.success:
+                summary = tool_result.output.get("summary", "")
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent, response=summary,
+                    provider="deterministic", tool_used="system.info_summary",
+                    tool_result=tool_result,
+                )
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"System info error: {tool_result.error}",
+                provider="deterministic", error=tool_result.error,
+            )
+
+        # --- Process management ---
+        if action == "process":
+            # Check if asking if something is running
+            import re
+            is_running_match = re.search(
+                r"\b(is|are)\s+(.+?)\s+(running|open|alive)\b", text, re.IGNORECASE
+            )
+            if is_running_match:
+                app_name = is_running_match.group(2).strip()
+                tool_result = await self.tool_registry.execute(
+                    "application.is_running", application=app_name
+                )
+                if tool_result.success:
+                    data = tool_result.output
+                    running = data.get("running", False)
+                    count = data.get("process_count", 0)
+                    status = f"Yes, {app_name} is running ({count} process(es))." if running else f"No, {app_name} is not running."
+                    steps[-1]["status"] = "complete"
+                    return PipelineResult(
+                        text=text, intent=intent, response=status,
+                        provider="deterministic", tool_used="application.is_running",
+                        tool_result=tool_result,
+                    )
+
+            # Default: list processes
+            tool_result = await self.tool_registry.execute("process.list", max_results=15)
+            if tool_result.success:
+                procs = tool_result.output.get("processes", [])
+                lines = []
+                for p in procs[:15]:
+                    lines.append(f"  {p['name']:20s} PID={p['pid']:<8} CPU={p['cpu_percent']:<5.1f}% MEM={p['memory_mb']:.0f}MB")
+                listing = "\n".join(lines)
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response=f"Top processes by memory:\n{listing}",
+                    provider="deterministic", tool_used="process.list",
+                    tool_result=tool_result,
+                )
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Process listing error: {tool_result.error}",
+                provider="deterministic", error=tool_result.error,
+            )
+
+        # --- VS Code with project/folder ---
         if intent.extracted_action == "vscode" or "vs code" in text.lower() or "vscode" in text.lower():
             # Check if there's a folder/project to open
             folder_match = None

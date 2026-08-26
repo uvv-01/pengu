@@ -4,11 +4,9 @@ Deterministic tools for Pengu — real OS control.
 These tools execute actual operations on the user's machine.
 No LLM needed for deterministic operations.
 
-Categories:
-  - filesystem: read, write, list, search, create, delete
-  - terminal: execute shell commands
-  - application: open, close, focus applications
-  - git: status, diff, log, branch, checkout, add, commit
+Day 1+2: filesystem, terminal, application, git, network basics
+Day 3:   enhanced app management, process management, secure filesystem,
+         safe terminal, system info, VS Code integration
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ logger = get_logger("pengu.tools.deterministic")
 
 
 # ---------------------------------------------------------------------------
-# Filesystem tools
+# Filesystem tools (Day 1 — kept for backward compatibility)
 # ---------------------------------------------------------------------------
 
 
@@ -212,132 +210,74 @@ async def terminal_execute(
             },
         )
     except subprocess.TimeoutExpired:
-        return ToolResult(
-            success=False,
-            error=f"Command timed out after {timeout}s: {command[:100]}",
-        )
+        return ToolResult(success=False, error=f"Command timed out after {timeout}s: {command[:100]}")
     except Exception as e:
         return ToolResult(success=False, error=str(e))
 
 
 # ---------------------------------------------------------------------------
-# Application tools
+# Application tools (Day 1 base)
 # ---------------------------------------------------------------------------
-
-# Known application commands (Windows)
-APP_COMMANDS: dict[str, dict[str, str]] = {
-    "code": {"command": "code", "description": "VS Code"},
-    "chrome": {"command": "start chrome", "description": "Google Chrome"},
-    "firefox": {"command": "start firefox", "description": "Mozilla Firefox"},
-    "msedge": {"command": "start msedge", "description": "Microsoft Edge"},
-    "wt": {"command": "wt", "description": "Windows Terminal"},
-    "explorer": {"command": "explorer", "description": "File Explorer"},
-    "notepad": {"command": "notepad", "description": "Notepad"},
-    "pwsh": {"command": "pwsh", "description": "PowerShell"},
-    "cmd": {"command": "cmd", "description": "Command Prompt"},
-    "cursor": {"command": "cursor", "description": "Cursor"},
-    "intellij": {"command": "idea64", "description": "IntelliJ IDEA"},
-    "pycharm": {"command": "pycharm64", "description": "PyCharm"},
-    "webstorm": {"command": "webstorm64", "description": "WebStorm"},
-    "git-bash": {"command": "start git-bash", "description": "Git Bash"},
-}
-
 
 async def app_open(
     application: str, arguments: str = "", cwd: str | None = None
 ) -> ToolResult:
-    """Open an application."""
-    try:
-        # Normalize application name
-        app_lower = application.lower().strip()
+    """Open an application via the AppManager (registry-only, no arbitrary launch)."""
+    from pengu.os.app_manager import get_app_manager
+    manager = get_app_manager()
+    result = manager.open(application, arguments=arguments, cwd=cwd)
+    return ToolResult(
+        success=result["success"],
+        output=result if result["success"] else None,
+        error=result.get("error", ""),
+    )
 
-        # Check known apps
-        if app_lower in APP_COMMANDS:
-            cmd = APP_COMMANDS[app_lower]["command"]
-            if arguments:
-                cmd = f"{cmd} {arguments}"
-            elif cwd:
-                cmd = f"{cmd} {cwd}"
 
-            subprocess.Popen(
-                cmd,
-                shell=True,
-                cwd=None,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+async def app_close(application: str) -> ToolResult:
+    """Close an application by name using the AppManager."""
+    from pengu.os.app_manager import get_app_manager
+    manager = get_app_manager()
+    result = manager.close(application)
+    return ToolResult(
+        success=result["success"],
+        output=result if result["success"] else None,
+        error=result.get("error", ""),
+    )
 
-            return ToolResult(
-                success=True,
-                output={
-                    "application": APP_COMMANDS[app_lower]["description"],
-                    "command": cmd,
-                    "status": "launched",
-                },
-            )
 
-        # Try to find the application on PATH
-        path = shutil.which(app_lower)
-        if path:
-            cmd_list = [path]
-            if arguments:
-                cmd_list.extend(arguments.split())
+async def app_is_running(application: str) -> ToolResult:
+    """Check if an application is running."""
+    from pengu.os.app_manager import get_app_manager
+    manager = get_app_manager()
+    result = manager.is_running(application)
+    return ToolResult(
+        success=result["success"],
+        output=result,
+        error=result.get("error", ""),
+    )
 
-            subprocess.Popen(
-                cmd_list,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
 
-            return ToolResult(
-                success=True,
-                output={
-                    "application": application,
-                    "path": path,
-                    "status": "launched",
-                },
-            )
-
-        # Try Windows 'start' command as last resort
-        if platform.system() == "Windows":
-            cmd = f"start {application}"
-            if arguments:
-                cmd += f" {arguments}"
-            subprocess.Popen(
-                cmd,
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return ToolResult(
-                success=True,
-                output={
-                    "application": application,
-                    "command": cmd,
-                    "status": "launched via start",
-                },
-            )
-
-        return ToolResult(
-            success=False,
-            error=f"Application not found: {application}. Known apps: {', '.join(APP_COMMANDS.keys())}",
-        )
-    except Exception as e:
-        return ToolResult(success=False, error=str(e))
+async def app_list_installed() -> ToolResult:
+    """List all discovered installed applications."""
+    from pengu.os.app_manager import get_app_manager
+    manager = get_app_manager()
+    apps = manager.list_installed()
+    return ToolResult(
+        success=True,
+        output={"applications": apps, "count": len(apps)},
+    )
 
 
 async def app_list_running() -> ToolResult:
-    """List running applications."""
+    """List running applications with visible windows."""
     try:
         if platform.system() == "Windows":
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
-                 "Get-Process | Where-Object {$_.MainWindowTitle} | Select-Object Name, MainWindowTitle | ConvertTo-Json"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                encoding="utf-8",
-                errors="replace",
+                 "Get-Process | Where-Object {$_.MainWindowTitle} | "
+                 "Select-Object Name, MainWindowTitle, Id | ConvertTo-Json"],
+                capture_output=True, text=True, timeout=10,
+                encoding="utf-8", errors="replace",
             )
             import json
             try:
@@ -345,7 +285,7 @@ async def app_list_running() -> ToolResult:
                 if isinstance(processes, dict):
                     processes = [processes]
                 apps = [
-                    {"name": p.get("Name", ""), "title": p.get("MainWindowTitle", "")}
+                    {"name": p.get("Name", ""), "title": p.get("MainWindowTitle", ""), "pid": p.get("Id", 0)}
                     for p in processes
                     if p.get("MainWindowTitle")
                 ]
@@ -354,23 +294,55 @@ async def app_list_running() -> ToolResult:
                     output={"applications": apps, "count": len(apps)},
                 )
             except json.JSONDecodeError:
-                return ToolResult(
-                    success=True,
-                    output={"raw": result.stdout[:2000]},
-                )
+                return ToolResult(success=True, output={"raw": result.stdout[:2000]})
         else:
-            result = subprocess.run(
-                ["ps", "aux"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            return ToolResult(
-                success=True,
-                output={"raw": result.stdout[:3000]},
-            )
+            result = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=10)
+            return ToolResult(success=True, output={"raw": result.stdout[:3000]})
     except Exception as e:
         return ToolResult(success=False, error=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Process management tools (Day 3)
+# ---------------------------------------------------------------------------
+
+
+async def process_list(
+    name_filter: str = "", max_results: int = 20
+) -> ToolResult:
+    """List running processes with optional filtering."""
+    from pengu.os.process_manager import ProcessManager
+    pm = ProcessManager()
+    processes = pm.list_processes(name_filter=name_filter, max_results=max_results)
+    return ToolResult(
+        success=True,
+        output={
+            "processes": [p.to_dict() for p in processes],
+            "count": len(processes),
+        },
+    )
+
+
+async def process_info(pid: int) -> ToolResult:
+    """Get detailed info for a specific process."""
+    from pengu.os.process_manager import ProcessManager
+    pm = ProcessManager()
+    proc = pm.get_process(pid)
+    if proc is None:
+        return ToolResult(success=False, error=f"Process with PID {pid} not found")
+    return ToolResult(success=True, output=proc.to_dict())
+
+
+async def process_terminate(pid: int, force: bool = False) -> ToolResult:
+    """Safely terminate a process by PID."""
+    from pengu.os.process_manager import ProcessManager
+    pm = ProcessManager()
+    result = pm.terminate(pid, force=force)
+    return ToolResult(
+        success=result["success"],
+        output=result if result["success"] else None,
+        error=result.get("error", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -383,13 +355,8 @@ async def git_execute(args: list[str], cwd: str | None = None) -> ToolResult:
     try:
         cmd_list = ["git"] + args
         result = subprocess.run(
-            cmd_list,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            cwd=cwd,
-            encoding="utf-8",
-            errors="replace",
+            cmd_list, capture_output=True, text=True, timeout=15, cwd=cwd,
+            encoding="utf-8", errors="replace",
         )
         return ToolResult(
             success=result.returncode == 0,
@@ -415,7 +382,7 @@ async def git_status(cwd: str | None = None) -> ToolResult:
 
 async def git_log(cwd: str | None = None, n: int = 10) -> ToolResult:
     """Get recent git log."""
-    return await git_execute(["log", f"--oneline", f"-{n}"], cwd=cwd)
+    return await git_execute(["log", "--oneline", f"-{n}"], cwd=cwd)
 
 
 async def git_diff(cwd: str | None = None) -> ToolResult:
@@ -433,16 +400,10 @@ async def network_list_wifi() -> ToolResult:
     try:
         result = subprocess.run(
             ["netsh", "wlan", "show", "networks", "mode=bssid"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            encoding="utf-8",
-            errors="replace",
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
-        return ToolResult(
-            success=result.returncode == 0,
-            output={"raw": result.stdout[:5000]},
-        )
+        return ToolResult(success=result.returncode == 0, output={"raw": result.stdout[:5000]})
     except Exception as e:
         return ToolResult(success=False, error=str(e))
 
@@ -452,18 +413,65 @@ async def network_wifi_status() -> ToolResult:
     try:
         result = subprocess.run(
             ["netsh", "wlan", "show", "interfaces"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            encoding="utf-8",
-            errors="replace",
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
-        return ToolResult(
-            success=result.returncode == 0,
-            output={"raw": result.stdout[:3000]},
-        )
+        return ToolResult(success=result.returncode == 0, output={"raw": result.stdout[:3000]})
     except Exception as e:
         return ToolResult(success=False, error=str(e))
+
+
+# ---------------------------------------------------------------------------
+# System info tools (Day 3)
+# ---------------------------------------------------------------------------
+
+
+async def system_info() -> ToolResult:
+    """Get human-readable system info summary."""
+    from pengu.os.system_info import get_system_info_summary
+    summary = get_system_info_summary()
+    return ToolResult(success=True, output={"summary": summary})
+
+
+# ---------------------------------------------------------------------------
+# VS Code tools (Day 3)
+# ---------------------------------------------------------------------------
+
+
+async def vscode_open_folder(folder_path: str) -> ToolResult:
+    """Open a folder in VS Code."""
+    from pengu.os.vscode import open_folder
+    result = open_folder(folder_path)
+    return ToolResult(
+        success=result["success"],
+        output=result if result["success"] else None,
+        error=result.get("error", ""),
+    )
+
+
+async def vscode_open_file(file_path: str, line: int = 0) -> ToolResult:
+    """Open a file in VS Code, optionally at a specific line."""
+    from pengu.os.vscode import open_file, open_file_at_line
+    if line > 0:
+        result = open_file_at_line(file_path, line)
+    else:
+        result = open_file(file_path)
+    return ToolResult(
+        success=result["success"],
+        output=result if result["success"] else None,
+        error=result.get("error", ""),
+    )
+
+
+async def vscode_focus() -> ToolResult:
+    """Bring VS Code to the foreground."""
+    from pengu.os.vscode import focus_vscode
+    result = focus_vscode()
+    return ToolResult(
+        success=result["success"],
+        output=result if result["success"] else None,
+        error=result.get("error", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +482,7 @@ async def network_wifi_status() -> ToolResult:
 def register_deterministic_tools(registry: ToolRegistry) -> None:
     """Register all deterministic tools in the registry."""
     tools = [
-        # Filesystem
+        # --- Filesystem ---
         Tool(
             name="filesystem.read_file",
             description="Read a file's contents",
@@ -552,7 +560,8 @@ def register_deterministic_tools(registry: ToolRegistry) -> None:
             },
             handler=fs_grep,
         ),
-        # Terminal
+
+        # --- Terminal ---
         Tool(
             name="terminal.execute",
             description="Execute a shell command",
@@ -570,7 +579,8 @@ def register_deterministic_tools(registry: ToolRegistry) -> None:
             },
             handler=terminal_execute,
         ),
-        # Application
+
+        # --- Application ---
         Tool(
             name="application.open",
             description="Open an application",
@@ -588,6 +598,42 @@ def register_deterministic_tools(registry: ToolRegistry) -> None:
             handler=app_open,
         ),
         Tool(
+            name="application.close",
+            description="Close an application by name",
+            category="application",
+            permission_level=PermissionLevel.LOW_RISK,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "application": {"type": "string", "description": "Application name"},
+                },
+                "required": ["application"],
+            },
+            handler=app_close,
+        ),
+        Tool(
+            name="application.is_running",
+            description="Check if an application is currently running",
+            category="application",
+            permission_level=PermissionLevel.SAFE,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "application": {"type": "string", "description": "Application name"},
+                },
+                "required": ["application"],
+            },
+            handler=app_is_running,
+        ),
+        Tool(
+            name="application.list_installed",
+            description="List all discovered installed applications",
+            category="application",
+            permission_level=PermissionLevel.SAFE,
+            parameters={"type": "object", "properties": {}},
+            handler=app_list_installed,
+        ),
+        Tool(
             name="application.list_running",
             description="List currently running applications with visible windows",
             category="application",
@@ -595,7 +641,53 @@ def register_deterministic_tools(registry: ToolRegistry) -> None:
             parameters={"type": "object", "properties": {}},
             handler=app_list_running,
         ),
-        # Git
+
+        # --- Process management ---
+        Tool(
+            name="process.list",
+            description="List running processes with optional filtering",
+            category="process",
+            permission_level=PermissionLevel.SAFE,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name_filter": {"type": "string", "default": "", "description": "Filter by process name"},
+                    "max_results": {"type": "integer", "default": 20},
+                },
+            },
+            handler=process_list,
+        ),
+        Tool(
+            name="process.info",
+            description="Get detailed info for a specific process",
+            category="process",
+            permission_level=PermissionLevel.SAFE,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pid": {"type": "integer", "description": "Process ID"},
+                },
+                "required": ["pid"],
+            },
+            handler=process_info,
+        ),
+        Tool(
+            name="process.terminate",
+            description="Safely terminate a process by PID",
+            category="process",
+            permission_level=PermissionLevel.HIGH_RISK,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pid": {"type": "integer", "description": "Process ID"},
+                    "force": {"type": "boolean", "default": False},
+                },
+                "required": ["pid"],
+            },
+            handler=process_terminate,
+        ),
+
+        # --- Git ---
         Tool(
             name="git.status",
             description="Get git repository status",
@@ -651,7 +743,8 @@ def register_deterministic_tools(registry: ToolRegistry) -> None:
             },
             handler=git_execute,
         ),
-        # Network
+
+        # --- Network ---
         Tool(
             name="network.list_wifi",
             description="List available Wi-Fi networks",
@@ -667,6 +760,55 @@ def register_deterministic_tools(registry: ToolRegistry) -> None:
             permission_level=PermissionLevel.SAFE,
             parameters={"type": "object", "properties": {}},
             handler=network_wifi_status,
+        ),
+
+        # --- System info (Day 3) ---
+        Tool(
+            name="system.info",
+            description="Get human-readable system info summary",
+            category="system",
+            permission_level=PermissionLevel.SAFE,
+            parameters={"type": "object", "properties": {}},
+            handler=system_info,
+        ),
+
+        # --- VS Code (Day 3) ---
+        Tool(
+            name="vscode.open_folder",
+            description="Open a folder/project in VS Code",
+            category="vscode",
+            permission_level=PermissionLevel.LOW_RISK,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "folder_path": {"type": "string", "description": "Folder path or project name"},
+                },
+                "required": ["folder_path"],
+            },
+            handler=vscode_open_folder,
+        ),
+        Tool(
+            name="vscode.open_file",
+            description="Open a file in VS Code, optionally at a specific line",
+            category="vscode",
+            permission_level=PermissionLevel.LOW_RISK,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "File path"},
+                    "line": {"type": "integer", "default": 0, "description": "Line number (0 for top)"},
+                },
+                "required": ["file_path"],
+            },
+            handler=vscode_open_file,
+        ),
+        Tool(
+            name="vscode.focus",
+            description="Bring VS Code to the foreground",
+            category="vscode",
+            permission_level=PermissionLevel.SAFE,
+            parameters={"type": "object", "properties": {}},
+            handler=vscode_focus,
         ),
     ]
 

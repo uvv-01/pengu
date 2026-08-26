@@ -66,10 +66,49 @@ VSCODE_RULES: list[Rule] = [
             r"\bcode\s+\.?\s*open\b",
             r"\bopen\s+.*\bin\s+vs\s*code\b",
             r"\bopen\s+.*\bin\s+code\b",
+            r"\bopen\s+(my\s+)?(.+?)\s+in\s+(vs\s*code|code)\b",
         ]),
         action="vscode",
         confidence=0.95,
         description="VS Code operations",
+    ),
+]
+
+# System info rules
+SYSTEM_INFO_RULES: list[Rule] = [
+    Rule(
+        category=TaskCategory.SYSTEM_CONTROL,
+        patterns=_compile([
+            r"\bwhat('s|\s+is)\s+(my\s+)?(cpu|processor|ram|memory|gpu|disk|storage|system)\b",
+            r"\bwhat\s+\w*\s+(do|does)\s+(i|this\s+computer)\s+have\b",
+            r"\bhow\s+(much|many)\s+(ram|memory|storage|disk|cpu|cores)\b",
+            r"\bsystem\s+(info|information|details|specs)\b",
+            r"\bwhat\s+(tier|class)\s+(is\s+)?(this|my)\b",
+            r"\bshow\s+(me\s+)?(system|hardware|specs)\b",
+            r"\bcheck\s+(my\s+)?(system|hardware|specs)\b",
+            r"\bwhat\s+computer\s+is\s+this\b",
+            r"\brun\s+system\s+info\b",
+        ]),
+        action="system_info",
+        confidence=0.95,
+        description="System information queries",
+    ),
+]
+
+# Process management rules
+PROCESS_RULES: list[Rule] = [
+    Rule(
+        category=TaskCategory.SYSTEM_CONTROL,
+        patterns=_compile([
+            r"\b(list|show|what)\s+(is\s+)?(running|processes?|apps?)\b",
+            r"\bwhat('s|\s+is)\s+(using|eating|consuming)\s+(cpu|memory|ram|disk)\b",
+            r"\btop\s+(cpu|memory|ram)\b",
+            r"\bprocess\s+(list|info|details)\b",
+            r"\b(is|are)\s+.+?\s+(running|open|alive)\b",
+        ]),
+        action="process",
+        confidence=0.9,
+        description="Process inspection and management",
     ),
 ]
 
@@ -264,7 +303,9 @@ CHAT_RULES: list[Rule] = [
 
 # All rules in priority order
 ALL_RULES: list[Rule] = (
-    VSCODE_RULES
+    SYSTEM_INFO_RULES
+    + PROCESS_RULES
+    + VSCODE_RULES
     + GIT_RULES
     + TERMINAL_RULES
     + CODING_RULES
@@ -477,7 +518,10 @@ class IntentRouter:
                     target = ""
 
                     if rule.category == TaskCategory.SYSTEM_CONTROL:
-                        action, target = _extract_application(text)
+                        if rule.action and rule.action not in ('', 'application'):
+                            action = rule.action
+                        else:
+                            action, target = _extract_application(text)
                     elif rule.category == TaskCategory.FILE_OPERATION:
                         action, target = _extract_file_target(text)
                     elif rule.category == TaskCategory.GIT:
