@@ -2,7 +2,15 @@
 Pengu Application — production voice-first desktop assistant.
 
 Architecture:
-  Voice → STT → Command Parser → Deterministic Tool / LLM → TTS → Standby
+  Voice → VAD + STT wake word → Command Parser → Deterministic Tool / LLM → TTS → Standby
+
+Features:
+  - STT-based wake word detection ("hello pengu")
+  - Deterministic-first command routing
+  - Model auto-discovery (LM Studio, Ollama)
+  - TTS barge-in support
+  - Full diagnostics
+  - Desktop overlay and system tray integration
 """
 
 from __future__ import annotations
@@ -15,9 +23,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import httpx
+
 from pengu.config import get_config
 from pengu.logging import get_logger, setup_logging
-from pengu.models.lmstudio import LMStudioProvider
 from pengu.os.app_launcher import get_launcher
 from pengu.tools.deterministic import register_deterministic_tools
 from pengu.tools.registry import ToolRegistry
@@ -29,9 +38,13 @@ logger = get_logger("pengu.app")
 
 
 def _get_pengu_root() -> Path:
-    """Get the Pengu project root directory."""
+    """Get the Pengu project root directory dynamically."""
     return Path(__file__).resolve().parent.parent.parent
 
+
+# ---------------------------------------------------------------------------
+# Command Parser — deterministic-first routing
+# ---------------------------------------------------------------------------
 
 class CommandParser:
     """
@@ -50,64 +63,78 @@ class CommandParser:
         """
         text_lower = text.lower().strip()
 
-        # ---- APPLICATION LAUNCHING ----
-        # "open VS Code" / "launch Chrome" / "start Edge"
+        # Strip common prefixes
+        for prefix in ["pengu,", "pengu ", "hey pengu,", "hey pengu ", "okay pengu,", "okay pengu "]:
+            if text_lower.startswith(prefix):
+                text_lower = text_lower[len(prefix):].strip()
+                break
+
+        # ---- STOP / CANCEL ----
+        if text_lower in ["stop", "cancel", "never mind", "nevermind", "forget it", "shut up", "quiet"]:
+            return {"action": "stop", "speak": "OK, stopped."}
+
+        # ---- HELP ----
+        if any(w in text_lower for w in ["what can you do", "help me", "your commands", "what are your commands"]):
+            return {
+                "action": "help",
+                "speak": (
+                    "I can open applications like VS Code, Chrome, and File Explorer. "
+                    "I can search Google, open ChatGPT, work with files and folders, "
+                    "run Git commands, show system information, and answer questions using a local AI model. "
+                    "Just say hello Pengu, then tell me what you need."
+                ),
+            }
+
+        # ---- DIAGNOSTICS ----
+        if any(w in text_lower for w in ["diagnostics", "diagnostic", "run diagnostics", "test yourself", "doctor", "check yourself"]):
+            return {"action": "diagnostics", "speak": self._run_diagnostics()}
+
+        # ---- OPEN PENGU ----
+        if "open pengu" in text_lower or "open pengo" in text_lower:
+            if any(w in text_lower for w in ["vs code", "visual studio code", "in code"]):
+                result = self._launcher.open_in_vscode(str(self._pengu_root))
+                return {"action": "open_in_vscode", "speak": result["message"]}
+            elif any(w in text_lower for w in ["in explorer", "folder", "in file"]):
+                result = self._launcher.open_folder(str(self._pengu_root))
+                return {"action": "open_folder", "speak": result["message"]}
+            else:
+                result = self._launcher.open_folder(str(self._pengu_root))
+                return {"action": "open_folder", "speak": result["message"]}
+
+        # ---- OPEN [APP] IN VS CODE ----
         m = re.match(
-            r'^(?:open|launch|start|run)\s+(.+?)(?:\s+(?:in|with)\s+(.+))?$',
+            r'^(?:open|launch)\s+(.+?)\s+in\s+(?:vs\s*code|visual\s+studio\s+code|code)\s*\.?$',
             text_lower,
         )
         if m:
-            target = m.group(1).strip().rstrip(".")
-            context = m.group(2).strip() if m.group(2) else None
-
-            # "open Pengu in VS Code"
-            if context and ("vs code" in context or "visual studio code" in context or "code" in context):
-                folder = self._resolve_project(target)
-                return {"action": "open_in_vscode", "target": folder, "speak": f"Opening {target} in Visual Studio Code."}
-
-            # "open ChatGPT"
-            if "chatgpt" in target or "chat gpt" in target:
-                return {"action": "open_chatgpt", "speak": "Opening ChatGPT."}
-
-            # "open Google" / "open YouTube" / "open GitHub"
-            known_urls = {
-                "google": "https://www.google.com",
-                "youtube": "https://www.youtube.com",
-                "github": "https://github.com",
-                "gmail": "https://mail.google.com",
-            }
-            for name, url in known_urls.items():
-                if name in target:
-                    return {"action": "open_url", "target": url, "speak": f"Opening {name}."}
-
-            # "search Google for X"
-            if "google" in target or "search" in target:
-                search_term = target
-                for word in ["google", "search", "for", "the", "web", "and"]:
-                    search_term = search_term.replace(word, "")
-                search_term = search_term.strip()
-                if search_term:
-                    return {"action": "google_search", "target": search_term, "speak": f"Searching Google for {search_term}."}
-
-            # Check if it's a known folder
+            target = m.group(1).strip()
             folder = self._resolve_project(target)
-            if folder and folder.exists():
-                if folder.is_dir():
-                    return {"action": "open_folder", "target": str(folder), "speak": f"Opening {folder.name} folder."}
-                else:
-                    return {"action": "open_file", "target": str(folder), "speak": f"Opening {folder.name}."}
+            if folder:
+                result = self._launcher.open_in_vscode(str(folder))
+                return {"action": "open_in_vscode", "speak": result["message"]}
+            else:
+                return {"action": "error", "speak": f"I couldn't find the {target} folder."}
 
-            # Try as application name
-            app = self._launcher.find_app(target)
-            if app:
-                result = self._launcher.open_application(target)
-                if result["success"]:
-                    return {"action": "open_app", "target": app.name, "speak": result["message"]}
-                else:
-                    return {"action": "error", "speak": result["message"]}
+        # ---- SEARCH CHATGPT ----
+        m = re.match(
+            r'^(?:search|ask)\s+chatgpt\s+(?:for\s+|about\s+)?(.+)',
+            text_lower,
+        )
+        if m:
+            query = m.group(1).strip().rstrip(".")
+            if query:
+                url = f"https://chatgpt.com/?q={query.replace(' ', '+')}"
+                result = self._launcher.open_url(url)
+                return {"action": "open_chatgpt_search", "speak": f"Searching ChatGPT for {query}."}
 
-            # Unknown application
-            return {"action": "error", "speak": f"I couldn't find {target} on your system."}
+        # ---- OPEN CHATGPT ----
+        if "chatgpt" in text_lower or "chat gpt" in text_lower:
+            if any(w in text_lower for w in ["search", "ask", "query"]):
+                # Already handled above
+                pass
+            else:
+                result = self._launcher.open_url("https://chatgpt.com")
+                return {"action": "open_chatgpt", "speak": "Opening ChatGPT."}
 
         # ---- SEARCH GOOGLE ----
         m = re.match(
@@ -115,25 +142,111 @@ class CommandParser:
             text_lower,
         )
         if m:
-            query = m.group(1).strip()
+            query = m.group(1).strip().rstrip(".")
             if query:
-                return {"action": "google_search", "target": query, "speak": f"Searching Google for {query}."}
+                result = self._launcher.google_search(query)
+                return {"action": "google_search", "speak": f"Searching Google for {query}."}
 
-        # ---- SEARCH CHATGPT ----
+        # ---- OPEN CHROME ----
+        if "open chrome" in text_lower or "launch chrome" in text_lower or "start chrome" in text_lower:
+            result = self._launcher.open_application("chrome")
+            return {"action": "open_app", "speak": result["message"]}
+
+        # ---- OPEN EDGE ----
+        if "open edge" in text_lower or "launch edge" in text_lower:
+            result = self._launcher.open_application("edge")
+            return {"action": "open_app", "speak": result["message"]}
+
+        # ---- OPEN EXPLORER / FILE EXPLORER ----
+        if any(w in text_lower for w in ["open explorer", "open file explorer", "open files", "open my computer", "open file manager"]):
+            result = self._launcher.open_application("explorer")
+            return {"action": "open_app", "speak": result["message"]}
+
+        # ---- OPEN TERMINAL / COMMAND PROMPT ----
+        if any(w in text_lower for w in ["open terminal", "open command prompt", "open cmd", "open powershell"]):
+            if "powershell" in text_lower:
+                result = self._launcher.open_application("powershell")
+            elif "cmd" in text_lower or "command prompt" in text_lower:
+                result = self._launcher.open_application("cmd")
+            else:
+                result = self._launcher.open_application("terminal")
+            return {"action": "open_app", "speak": result["message"]}
+
+        # ---- OPEN NOTEPAD ----
+        if "open notepad" in text_lower or "launch notepad" in text_lower:
+            result = self._launcher.open_application("notepad")
+            return {"action": "open_app", "speak": result["message"]}
+
+        # ---- OPEN VS CODE ----
+        if any(w in text_lower for w in ["open vs code", "open visual studio code", "launch vs code", "launch visual studio code", "open code"]):
+            result = self._launcher.open_application("vscode")
+            return {"action": "open_app", "speak": result["message"]}
+
+        # ---- OPEN TASK MANAGER ----
+        if "task manager" in text_lower:
+            result = self._launcher.open_application("taskmanager")
+            return {"action": "open_app", "speak": result["message"]}
+
+        # ---- OPEN SETTINGS ----
+        if "open settings" in text_lower or "system settings" in text_lower:
+            result = self._launcher.open_application("settings")
+            return {"action": "open_app", "speak": result["message"]}
+
+        # ---- OPEN [KNOWN URLS] ----
+        known_urls = {
+            "google": "https://www.google.com",
+            "youtube": "https://www.youtube.com",
+            "github": "https://github.com",
+            "gmail": "https://mail.google.com",
+        }
+        for name, url in known_urls.items():
+            if f"open {name}" in text_lower or f"launch {name}" in text_lower:
+                result = self._launcher.open_url(url)
+                return {"action": "open_url", "speak": f"Opening {name}."}
+
+        # ---- GENERIC OPEN [ANYTHING] ----
         m = re.match(
-            r'^(?:search|ask)\s+chatgpt\s+(?:for\s+)?(.+)',
+            r'^(?:open|launch|start|run)\s+(.+?)(?:\s+in\s+(.+))?\s*\.?$',
             text_lower,
         )
         if m:
-            query = m.group(1).strip()
-            if query:
-                url = f"https://chatgpt.com/?q={query.replace(' ', '+')}"
-                return {"action": "open_url", "target": url, "speak": f"Opening ChatGPT with your question."}
+            target = m.group(1).strip()
+            context = m.group(2).strip() if m.group(2) else None
+
+            # "open X in VS Code"
+            if context and any(w in context for w in ["vs code", "visual studio code", "code"]):
+                folder = self._resolve_project(target)
+                if folder:
+                    result = self._launcher.open_in_vscode(str(folder))
+                    return {"action": "open_in_vscode", "speak": result["message"]}
+
+            # Check if it's a known project/folder
+            folder = self._resolve_project(target)
+            if folder and folder.exists():
+                if folder.is_dir():
+                    result = self._launcher.open_folder(str(folder))
+                    return {"action": "open_folder", "speak": result["message"]}
+                else:
+                    result = self._launcher.open_file(str(folder))
+                    return {"action": "open_file", "speak": result["message"]}
+
+            # Try as application
+            app = self._launcher.find_app(target)
+            if app:
+                result = self._launcher.open_application(target)
+                return {"action": "open_app", "speak": result["message"]}
+
+            return {"action": "error", "speak": f"I couldn't find {target} on your system."}
+
+        # ---- CLOSE [APP] ----
+        m = re.match(r'^(?:close|quit|exit)\s+(.+?)\s*\.?$', text_lower)
+        if m:
+            target = m.group(1).strip()
+            return {"action": "close_app", "speak": f"Closing {target} is not yet supported. You can close it manually."}
 
         # ---- FILE OPERATIONS ----
-        # "create file X" / "create a file called X"
         m = re.search(
-            r'(?:create|make|new)\s+(?:a\s+)?(?:file\s+(?:called\s+|named\s+)?)?([^\s]+\.\w+)',
+            r'(?:create|make|new)\s+(?:a\s+)?(?:file\s+(?:called\s+|named\s+)?)?([^\s]+\.(\w+))',
             text_lower,
         )
         if m:
@@ -141,11 +254,10 @@ class CommandParser:
             file_path = self._pengu_root / filename
             try:
                 file_path.touch()
-                return {"action": "file_created", "target": filename, "speak": f"Created {filename} in the Pengu folder."}
+                return {"action": "file_created", "speak": f"Created {filename} in the Pengu folder."}
             except Exception as e:
                 return {"action": "error", "speak": f"Failed to create {filename}: {e}"}
 
-        # "create folder X"
         m = re.search(
             r'(?:create|make|new)\s+(?:a\s+)?folder\s+(?:called\s+|named\s+)?([^\s]+)',
             text_lower,
@@ -155,7 +267,7 @@ class CommandParser:
             folder_path = self._pengu_root / foldername
             try:
                 folder_path.mkdir(exist_ok=True)
-                return {"action": "folder_created", "target": foldername, "speak": f"Created folder {foldername}."}
+                return {"action": "folder_created", "speak": f"Created folder {foldername}."}
             except Exception as e:
                 return {"action": "error", "speak": f"Failed to create folder {foldername}: {e}"}
 
@@ -173,33 +285,21 @@ class CommandParser:
             return {"action": "git_result", "speak": f"Changes: {output[:200]}"}
 
         # ---- SYSTEM INFO ----
-        if any(w in text_lower for w in ["system info", "system information", "what cpu", "what ram", "what processor", "computer info"]):
+        if any(w in text_lower for w in [
+            "system info", "system information", "what cpu", "what ram",
+            "what processor", "computer info", "what computer", "show system",
+            "check system", "what are my specs", "what are my system specs",
+        ]):
             return {"action": "system_info", "speak": self._get_system_info()}
 
         # ---- LIST FILES ----
         if any(w in text_lower for w in ["list files", "show files", "what's in", "what is in", "show me files"]):
             return {"action": "list_files", "speak": self._list_files()}
 
-        # ---- OPEN PENGU ----
-        if "open pengu" in text_lower:
-            if "vs code" in text_lower or "code" in text_lower:
-                result = self._launcher.open_in_vscode(str(self._pengu_root))
-                return {"action": "open_in_vscode", "speak": result["message"]}
-            else:
-                result = self._launcher.open_folder(str(self._pengu_root))
-                return {"action": "open_folder", "speak": result["message"]}
-
-        # ---- STOP ----
-        if text_lower in ["stop", "cancel", "never mind", "nevermind", "forget it"]:
-            return {"action": "stop", "speak": "OK, stopped."}
-
-        # ---- DIAGNOSTICS ----
-        if any(w in text_lower for w in ["diagnostics", "diagnostic", "run diagnostics", "test yourself", "doctor"]):
-            return {"action": "diagnostics", "speak": self._run_diagnostics()}
-
-        # ---- HELP ----
-        if any(w in text_lower for w in ["help", "what can you do", "commands"]):
-            return {"action": "help", "speak": "I can open applications, search Google, work with files, run Git commands, and answer questions using a local AI model. Try saying: open VS Code, search Google for Python, or what is Python?"}
+        # ---- VOLUME ----
+        m = re.match(r'(?:set|turn|change)\s+volume\s+(?:to\s+)?(\d+)', text_lower)
+        if m:
+            return {"action": "volume", "speak": "Volume control is not yet implemented."}
 
         # None = send to LLM
         return None
@@ -208,7 +308,6 @@ class CommandParser:
         """Resolve a project name to a path."""
         name = name.strip().rstrip(".")
 
-        # Check if it's the Pengu project itself
         if "pengu" in name.lower():
             return self._pengu_root
 
@@ -217,7 +316,6 @@ class CommandParser:
             Path.home() / "projects" / name,
             Path.home() / name,
         ]
-        # Fuzzy match in projects dir
         projects = Path.home() / "projects"
         if projects.exists():
             for d in projects.iterdir():
@@ -271,9 +369,83 @@ class CommandParser:
         checks.append(f"Explorer: OK")
         import shutil
         checks.append(f"Git: {'OK' if shutil.which('git') else 'NOT FOUND'}")
-        checks.append(f"Python: OK")
+        checks.append("Python: OK")
         return "Diagnostics: " + "; ".join(checks)
 
+
+# ---------------------------------------------------------------------------
+# Model Discovery
+# ---------------------------------------------------------------------------
+
+class ModelDiscovery:
+    """Auto-detect available local model runtimes and models."""
+
+    def __init__(self) -> None:
+        self._active_provider: Optional[str] = None
+        self._active_model: Optional[str] = None
+        self._available_models: list[dict] = []
+
+    async def discover(self) -> dict[str, Any]:
+        """Discover available model runtimes and models."""
+        result = {"lm_studio": None, "ollama": None, "active": None}
+
+        # Check LM Studio
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get("http://localhost:1234/v1/models")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models = data.get("data", [])
+                    if models:
+                        model_ids = [m.get("id", "unknown") for m in models]
+                        result["lm_studio"] = model_ids
+                        self._active_provider = "lmstudio"
+                        self._active_model = model_ids[0]
+                        self._available_models = [{"provider": "lmstudio", "id": mid} for mid in model_ids]
+                        logger.info("lmstudio_models_found", models=model_ids)
+        except Exception:
+            pass
+
+        # Check Ollama
+        if not self._active_provider:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get("http://localhost:11434/api/tags")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        models = data.get("models", [])
+                        if models:
+                            model_names = [m.get("name", "unknown") for m in models]
+                            result["ollama"] = model_names
+                            self._active_provider = "ollama"
+                            self._active_model = model_names[0]
+                            self._available_models = [{"provider": "ollama", "id": n} for n in model_names]
+                            logger.info("ollama_models_found", models=model_names)
+            except Exception:
+                pass
+
+        result["active"] = {
+            "provider": self._active_provider,
+            "model": self._active_model,
+        }
+        return result
+
+    @property
+    def active_provider(self) -> Optional[str]:
+        return self._active_provider
+
+    @property
+    def active_model(self) -> Optional[str]:
+        return self._active_model
+
+    @property
+    def available_models(self) -> list[dict]:
+        return self._available_models
+
+
+# ---------------------------------------------------------------------------
+# Main Application
+# ---------------------------------------------------------------------------
 
 class PenguApp:
     """Main Pengu application."""
@@ -282,26 +454,38 @@ class PenguApp:
         self._config = get_config()
         self._voice_config = VoiceConfig()
         self._tool_registry = ToolRegistry()
-        self._provider: Optional[LMStudioProvider] = None
         self._voice: Optional[VoiceEngine] = None
         self._overlay: Optional[PenguOverlay] = None
         self._tray: Optional[PenguTray] = None
         self._parser = CommandParser(_get_pengu_root())
+        self._model_discovery = ModelDiscovery()
+        self._provider = None  # LMStudioProvider set after discovery
         self._running = False
 
     async def start(self) -> None:
+        """Start the Pengu application."""
         logger.info("pengu_starting")
         self._running = True
 
+        # Register tools
         register_deterministic_tools(self._tool_registry)
 
-        self._provider = LMStudioProvider()
-        await self._provider.health_check()
+        # Discover models
+        discovery_result = await self._model_discovery.discover()
+        logger.info("model_discovery", **discovery_result)
 
+        # Initialize LLM provider if available
+        if self._model_discovery.active_provider == "lmstudio":
+            from pengu.models.lmstudio import LMStudioProvider
+            self._provider = LMStudioProvider()
+            await self._provider.health_check()
+
+        # Start overlay
         self._overlay = PenguOverlay()
         self._overlay.start()
         time.sleep(0.5)
 
+        # Start tray
         self._tray = PenguTray(
             on_start=self._on_tray_start,
             on_pause=self._on_tray_pause,
@@ -310,6 +494,7 @@ class PenguApp:
         )
         self._tray.start()
 
+        # Start voice engine
         self._voice = VoiceEngine(
             config=self._voice_config,
             command_callback=self._process_command,
@@ -319,7 +504,7 @@ class PenguApp:
         if status.get("stt") or status.get("tts"):
             await self._voice.start()
 
-        logger.info("pengu_ready")
+        logger.info("pengu_ready", model=self._model_discovery.active_model)
 
         try:
             while self._running:
@@ -330,6 +515,7 @@ class PenguApp:
             await self.stop()
 
     async def stop(self) -> None:
+        """Stop the Pengu application."""
         self._running = False
         if self._voice:
             await self._voice.stop()
@@ -342,6 +528,8 @@ class PenguApp:
 
     def _process_command(self, text: str) -> Optional[str]:
         """Process a voice command. Returns spoken response."""
+        logger.info("processing_command", text=text)
+
         # Try deterministic parser first
         result = self._parser.parse(text)
         if result:
@@ -351,14 +539,25 @@ class PenguApp:
         return self._chat_with_llm(text)
 
     def _chat_with_llm(self, text: str) -> str:
+        """Chat with the local LLM for general questions."""
         if not self._provider or not self._provider.is_available():
-            return "I can execute desktop commands, but no local language model is currently available for general questions. Please start LM Studio and load a model."
+            return (
+                "I can execute desktop commands, but no local language model "
+                "is currently available for general questions. "
+                "Please start LM Studio and load a model."
+            )
 
         from pengu.models.base import ChatMessage
         loop = asyncio.new_event_loop()
         try:
             messages = [
-                ChatMessage(role="system", content="You are Pengu, a local-first desktop assistant. Be concise. Respond in 1-2 sentences."),
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "You are Pengu, a local-first desktop assistant running on Windows. "
+                        "Be concise and helpful. Respond in 1-2 sentences."
+                    ),
+                ),
                 ChatMessage(role="user", content=text),
             ]
             response = loop.run_until_complete(
@@ -371,23 +570,31 @@ class PenguApp:
             loop.close()
 
     def _on_voice_state_change(self, state: VoiceState) -> None:
+        """Handle voice state changes — update overlay and tray."""
         state_map = {
+            VoiceState.OFFLINE: OverlayState.ERROR,
+            VoiceState.STARTING: OverlayState.THINKING,
             VoiceState.STANDBY: OverlayState.STANDBY,
             VoiceState.WAKE_DETECTED: OverlayState.LISTENING,
+            VoiceState.ACKNOWLEDGING: OverlayState.SPEAKING,
             VoiceState.LISTENING: OverlayState.LISTENING,
             VoiceState.TRANSCRIBING: OverlayState.THINKING,
             VoiceState.THINKING: OverlayState.THINKING,
             VoiceState.EXECUTING: OverlayState.EXECUTING,
             VoiceState.SPEAKING: OverlayState.SPEAKING,
             VoiceState.ERROR: OverlayState.ERROR,
+            VoiceState.STOPPING: OverlayState.THINKING,
         }
         if self._overlay:
             self._overlay.set_state(state_map.get(state, OverlayState.STANDBY))
+
         if self._tray:
-            tray_state = TrayState.LISTENING if state in (VoiceState.LISTENING, VoiceState.WAKE_DETECTED) else TrayState.LISTENING
-            if state == VoiceState.ERROR:
-                tray_state = TrayState.ERROR
-            self._tray.set_state(tray_state)
+            if state in (VoiceState.LISTENING, VoiceState.WAKE_DETECTED, VoiceState.ACKNOWLEDGING):
+                self._tray.set_state(TrayState.LISTENING)
+            elif state == VoiceState.ERROR:
+                self._tray.set_state(TrayState.ERROR)
+            else:
+                self._tray.set_state(TrayState.LISTENING)
 
     def _on_tray_start(self) -> None:
         if self._voice and not self._voice.is_running:
@@ -409,6 +616,7 @@ class PenguApp:
 
 
 async def main() -> None:
+    """Main entry point."""
     setup_logging(level="INFO", json_output=False)
     app = PenguApp()
     await app.start()
