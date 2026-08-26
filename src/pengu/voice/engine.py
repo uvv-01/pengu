@@ -4,24 +4,21 @@ Pengu Voice Engine — the real always-on voice assistant loop.
 Pipeline:
   MICROPHONE → WAKE WORD → LISTENING → STT → COMMAND → ACTION → TTS → STANDBY
 
-Components:
-  - Microphone capture (sounddevice)
-  - Wake word detection (energy-based + keyword)
-  - Speech-to-text (faster-whisper)
-  - Text-to-speech (edge-tts)
-  - Conversation loop
+Uses:
+  - sounddevice for microphone capture
+  - faster-whisper for STT
+  - edge-tts for TTS
+  - Energy-based wake word with speech pause detection
 """
 
 from __future__ import annotations
 
 import asyncio
-import io
 import os
 import queue
 import tempfile
 import threading
 import time
-import wave
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -46,31 +43,31 @@ class VoiceState(str, Enum):
 class VoiceConfig:
     """Voice engine configuration."""
     # Microphone
-    sample_rate: int = 22050
+    sample_rate: int = 16000
     channels: int = 1
-    device_index: Optional[int] = None  # None = default
+    device_index: Optional[int] = None
 
     # Wake word
-    wake_energy_threshold: float = 10.0
-    wake_duration_seconds: float = 1.5
-    wake_keywords: list[str] = field(default_factory=lambda: ["hello pengu", "hey pengu", "pengu"])
+    wake_energy_threshold: float = 15.0
+    wake_min_duration: float = 0.5
+
+    # Speech collection
+    speech_energy_threshold: float = 8.0
+    silence_timeout: float = 1.5
+    min_speech_duration: float = 0.3
+    max_speech_duration: float = 30.0
 
     # STT
     stt_model_size: str = "tiny"
     stt_language: str = "en"
-    stt_max_duration: float = 30.0
 
     # TTS
     tts_voice: str = "en-US-GuyNeural"
     tts_rate: str = "+0%"
 
-    # Timing
-    silence_timeout: float = 2.0
-    min_speech_duration: float = 0.5
-
 
 class MicrophoneCapture:
-    """Captures audio from the microphone using sounddevice."""
+    """Captures audio from the microphone."""
 
     def __init__(self, config: VoiceConfig) -> None:
         self._config = config
@@ -103,69 +100,94 @@ class MicrophoneCapture:
         """Stop microphone capture."""
         self._is_recording = False
         if self._stream:
-            self._stream.stop()
-            self._stream.close()
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
             self._stream = None
-        # Signal end of stream
-        self._audio_queue.put(None)
 
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
-        """Callback for audio data."""
         if self._is_recording:
             self._audio_queue.put(indata.copy())
 
     def get_audio(self, timeout: float = 0.1) -> Optional[np.ndarray]:
-        """Get next audio chunk from the queue."""
         try:
             return self._audio_queue.get(timeout=timeout)
         except queue.Empty:
             return None
 
     def calculate_energy(self, audio: np.ndarray) -> float:
-        """Calculate audio energy (RMS)."""
         return float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
 
     @property
     def is_active(self) -> bool:
         return self._is_recording
 
+    def flush(self) -> None:
+        """Flush any buffered audio."""
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
 
 class WakeWordDetector:
-    """Detects 'Hello Pengu' using energy-based approach."""
+    """
+    Wake word detection using energy-based approach with pause detection.
+
+    Detects a sustained period of audio above threshold, followed by a pause.
+    This mimics someone saying "Hello Pengu" (speech → pause).
+    """
 
     def __init__(self, config: VoiceConfig) -> None:
         self._config = config
         self._energy_buffer: list[float] = []
-        self._buffer_duration = 3.0  # seconds of audio to keep
-        self._sample_rate = config.sample_rate
-        self._chunk_size = 1024
-        self._chunks_per_second = self._sample_rate / self._chunk_size
+        self._speech_detected = False
+        self._speech_start: float = 0
 
     def process_chunk(self, audio: np.ndarray, energy: float) -> bool:
         """
-        Process an audio chunk and check for wake word activation.
-
-        Returns True if wake word detected.
+        Process audio chunk. Returns True when wake word pattern detected.
         """
         self._energy_buffer.append(energy)
 
-        # Keep only recent buffer
-        max_chunks = int(self._buffer_duration * self._chunks_per_second)
+        # Keep only recent buffer (3 seconds)
+        max_chunks = int(3.0 * self._config.sample_rate / 1024)
         if len(self._energy_buffer) > max_chunks:
             self._energy_buffer = self._energy_buffer[-max_chunks:]
 
-        # Simple energy-based activation: sustained energy above threshold
-        if len(self._energy_buffer) >= int(self._config.wake_duration_seconds * self._chunks_per_second):
-            recent = self._energy_buffer[-int(self._config.wake_duration_seconds * self._chunks_per_second):]
-            avg_energy = sum(recent) / len(recent)
-            if avg_energy > self._config.wake_energy_threshold:
-                logger.info("wake_word_energy_detected", avg_energy=avg_energy)
-                return True
+        now = time.time()
+
+        if not self._speech_detected:
+            # Looking for speech onset
+            if energy > self._config.wake_energy_threshold:
+                self._speech_detected = True
+                self._speech_start = now
+        else:
+            # Speech was detected, now looking for pause (end of "Hello Pengu")
+            if energy < self._config.speech_energy_threshold:
+                speech_duration = now - self._speech_start
+                if speech_duration >= self._config.wake_min_duration:
+                    # We had speech followed by pause — wake word pattern
+                    logger.info("wake_word_detected", speech_duration=speech_duration)
+                    self._speech_detected = False
+                    self._energy_buffer.clear()
+                    return True
+                elif speech_duration > 2.0:
+                    # Too long, reset
+                    self._speech_detected = False
+            elif now - self._speech_start > 3.0:
+                # Speech too long, reset
+                self._speech_detected = False
 
         return False
 
     def reset(self) -> None:
         self._energy_buffer.clear()
+        self._speech_detected = False
+        self._speech_start = 0
 
 
 class SpeechCollector:
@@ -187,38 +209,28 @@ class SpeechCollector:
     def add_chunk(self, audio: np.ndarray, energy: float) -> None:
         if not self._is_collecting:
             return
-
         self._audio_buffer.append(audio)
-
-        # Update last speech time if energy is above threshold
-        if energy > self._config.wake_energy_threshold * 0.5:
+        if energy > self._config.speech_energy_threshold:
             self._last_speech_time = time.time()
 
     def should_stop(self) -> bool:
-        """Check if we should stop collecting speech."""
         if not self._is_collecting:
             return False
-
-        # Stop on silence timeout
         if time.time() - self._last_speech_time > self._config.silence_timeout:
             return True
-
-        # Stop on max duration
-        if time.time() - self._start_time > self._config.stt_max_duration:
+        if time.time() - self._start_time > self._config.max_speech_duration:
             return True
-
         return False
 
-    def get_audio(self) -> Optional[np.ndarray]:
-        """Get the collected audio as a numpy array."""
+    def stop(self) -> Optional[np.ndarray]:
+        self._is_collecting = False
         if not self._audio_buffer:
             return None
-        return np.concatenate(self._audio_buffer)
-
-    def stop(self) -> Optional[np.ndarray]:
-        """Stop collecting and return audio."""
-        self._is_collecting = False
-        return self.get_audio()
+        audio = np.concatenate(self._audio_buffer)
+        duration = len(audio) / self._config.sample_rate
+        if duration < self._config.min_speech_duration:
+            return None
+        return audio
 
 
 class STTEngine:
@@ -230,10 +242,8 @@ class STTEngine:
         self._available = False
 
     async def initialize(self) -> bool:
-        """Load the STT model."""
         try:
             from faster_whisper import WhisperModel
-
             logger.info("loading_stt_model", model=self._config.stt_model_size)
             self._model = WhisperModel(
                 self._config.stt_model_size,
@@ -245,39 +255,23 @@ class STTEngine:
             return True
         except Exception as e:
             logger.error("stt_model_load_failed", error=str(e))
-            self._available = False
             return False
 
     async def transcribe(self, audio: np.ndarray) -> Optional[str]:
-        """Transcribe audio to text."""
         if not self._available or self._model is None:
             return None
-
         try:
-            # Convert to float32 and normalize
             audio_float = audio.astype(np.float32) / 32768.0
-
             segments, info = self._model.transcribe(
                 audio_float,
                 language=self._config.stt_language,
                 beam_size=5,
             )
-
-            text_parts = []
-            for segment in segments:
-                text_parts.append(segment.text.strip())
-
+            text_parts = [seg.text.strip() for seg in segments]
             full_text = " ".join(text_parts).strip()
-
             if full_text:
-                logger.info(
-                    "transcription_complete",
-                    text=full_text[:100],
-                    language=info.language,
-                )
-
+                logger.info("transcription", text=full_text[:100])
             return full_text if full_text else None
-
         except Exception as e:
             logger.error("transcription_failed", error=str(e))
             return None
@@ -292,9 +286,9 @@ class TTSEngine:
     def __init__(self, config: VoiceConfig) -> None:
         self._config = config
         self._available = False
+        self._playback_lock = threading.Lock()
 
     async def initialize(self) -> bool:
-        """Check if TTS is available."""
         try:
             import edge_tts
             self._available = True
@@ -305,21 +299,17 @@ class TTSEngine:
             return False
 
     async def speak(self, text: str) -> bool:
-        """Speak text using edge-tts and play audio."""
-        if not self._available:
+        if not self._available or not text.strip():
             return False
 
         try:
             import edge_tts
-            import sounddevice as sd
-
             communicate = edge_tts.Communicate(
                 text,
                 self._config.tts_voice,
                 rate=self._config.tts_rate,
             )
 
-            # Collect audio data
             audio_data = b""
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
@@ -328,21 +318,29 @@ class TTSEngine:
             if not audio_data:
                 return False
 
-            # Play audio using sounddevice
-            # edge-tts outputs mp3, we need to decode it
-            # Use a temporary file approach
+            # Save to temp file and play with Windows default player
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
                 f.write(audio_data)
                 temp_path = f.name
 
             try:
-                # Use pygame or mpv to play, or fall back to subprocess
                 import subprocess
-                # Try using Windows default player
+                # Use PowerShell to play audio
+                ps_cmd = (
+                    f'(New-Object Media.SoundPlayer "{temp_path}").PlaySync()'
+                )
+                # For mp3, use Media.MediaPlayer
+                ps_cmd = f'''
+                Add-Type -AssemblyName PresentationCore
+                $player = New-Object System.Windows.Media.MediaPlayer
+                $player.Open([uri]::new("{temp_path}"))
+                $player.Play()
+                Start-Sleep -Seconds 3
+                '''
                 subprocess.run(
-                    ["cmd", "/c", "start", "/wait", temp_path],
+                    ["powershell", "-Command", ps_cmd],
                     capture_output=True,
-                    timeout=10,
+                    timeout=15,
                 )
             finally:
                 try:
@@ -364,18 +362,12 @@ class TTSEngine:
 class VoiceEngine:
     """
     Main voice engine — orchestrates the full conversation loop.
-
-    Usage:
-        engine = VoiceEngine(config)
-        await engine.start()
-        # Engine runs in background, calling callback on commands
-        await engine.stop()
     """
 
     def __init__(
         self,
         config: Optional[VoiceConfig] = None,
-        command_callback: Optional[Callable[[str], Any]] = None,
+        command_callback: Optional[Callable[[str], Optional[str]]] = None,
         state_callback: Optional[Callable[[VoiceState], None]] = None,
     ) -> None:
         self._config = config or VoiceConfig()
@@ -393,127 +385,125 @@ class VoiceEngine:
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-    async def initialize(self) -> bool:
-        """Initialize all components."""
+    async def initialize(self) -> dict[str, bool]:
+        """Initialize all components. Returns status dict."""
         stt_ok = await self._stt.initialize()
         tts_ok = await self._tts.initialize()
-
         mic_ok = self._microphone.start()
-        if not mic_ok:
-            logger.warning("microphone_unavailable")
 
-        logger.info(
-            "voice_engine_initialized",
-            stt=stt_ok,
-            tts=tts_ok,
-            mic=mic_ok,
-        )
+        status = {
+            "stt": stt_ok,
+            "tts": tts_ok,
+            "microphone": mic_ok,
+        }
 
-        return stt_ok or tts_ok  # At least one must work
+        logger.info("voice_engine_initialized", **status)
+        return status
 
     async def start(self) -> None:
         """Start the voice engine loop."""
         self._running = True
         self._set_state(VoiceState.IDLE)
-        logger.info("voice_engine_started")
-
-        # Run the loop in a background thread
         self._loop = asyncio.get_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
+        logger.info("voice_engine_started")
 
     async def stop(self) -> None:
-        """Stop the voice engine."""
         self._running = False
         self._microphone.stop()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
         self._set_state(VoiceState.IDLE)
-        logger.info("voice_engine_stopped")
 
     def _run_loop(self) -> None:
-        """Main voice loop (runs in a thread)."""
+        """Main voice loop (runs in background thread)."""
         while self._running:
             try:
-                # Phase 1: Wake word detection
+                # Phase 1: Wait for wake word
                 self._set_state(VoiceState.IDLE)
                 self._wake_detector.reset()
+                self._microphone.flush()
 
                 while self._running:
                     audio = self._microphone.get_audio(timeout=0.1)
                     if audio is None:
                         continue
-
                     energy = self._microphone.calculate_energy(audio)
-
                     if self._wake_detector.process_chunk(audio, energy):
-                        logger.info("wake_word_detected")
                         break
 
                 if not self._running:
                     break
 
-                # Phase 2: Listening
+                # Phase 2: Acknowledge and listen
                 self._set_state(VoiceState.LISTENING)
-                self._speech_collector.start()
 
-                # Play a short acknowledgment sound or speak
-                asyncio.run_coroutine_threadsafe(
+                # Speak acknowledgement
+                future = asyncio.run_coroutine_threadsafe(
                     self._tts.speak("Yes?"),
                     self._loop,
-                ).result(timeout=5)
+                )
+                try:
+                    future.result(timeout=5)
+                except Exception:
+                    pass
 
                 # Collect speech
+                self._speech_collector.start()
+                self._microphone.flush()
+
                 while self._running and not self._speech_collector.should_stop():
                     audio = self._microphone.get_audio(timeout=0.1)
                     if audio is not None:
                         energy = self._microphone.calculate_energy(audio)
                         self._speech_collector.add_chunk(audio, energy)
 
-                # Phase 3: Process
-                self._set_state(VoiceState.PROCESSING)
                 speech_audio = self._speech_collector.stop()
 
-                if speech_audio is None or len(speech_audio) == 0:
+                if speech_audio is None:
+                    logger.info("no_speech_detected")
                     continue
 
-                # Transcribe
+                # Phase 3: Transcribe
+                self._set_state(VoiceState.PROCESSING)
                 text = asyncio.run_coroutine_threadsafe(
                     self._stt.transcribe(speech_audio),
                     self._loop,
                 ).result(timeout=30)
 
                 if not text:
-                    logger.info("no_speech_detected")
+                    logger.info("empty_transcription")
                     continue
 
                 logger.info("command_received", text=text)
 
-                # Phase 4: Execute command
+                # Phase 4: Process command
                 if self._command_callback:
                     result = self._command_callback(text)
-                    if isinstance(result, str):
-                        # Speak the result
+                    if result:
                         self._set_state(VoiceState.SPEAKING)
-                        asyncio.run_coroutine_threadsafe(
+                        future = asyncio.run_coroutine_threadsafe(
                             self._tts.speak(result),
                             self._loop,
-                        ).result(timeout=30)
+                        )
+                        try:
+                            future.result(timeout=30)
+                        except Exception:
+                            pass
 
             except Exception as e:
                 logger.error("voice_loop_error", error=str(e))
                 self._set_state(VoiceState.ERROR)
-                time.sleep(1)
+                time.sleep(2)
 
     def _set_state(self, state: VoiceState) -> None:
-        """Set the voice engine state."""
         self._state = state
         if self._state_callback:
             try:
                 self._state_callback(state)
             except Exception:
                 pass
-        logger.info("voice_state_changed", state=state.value)
 
     @property
     def state(self) -> VoiceState:
@@ -524,7 +514,6 @@ class VoiceEngine:
         return self._running
 
     def get_status(self) -> dict[str, Any]:
-        """Get voice engine status."""
         return {
             "running": self._running,
             "state": self._state.value,
