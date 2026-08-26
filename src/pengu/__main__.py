@@ -1,5 +1,8 @@
 """Allow running Pengu as: python -m pengu"""
 
-from pengu.cli import main
+import asyncio
 
-main()
+from pengu.app import main
+
+if __name__ == "__main__":
+    asyncio.run(main())
