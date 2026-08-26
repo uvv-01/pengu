@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pengu</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="pengu-app">
+        <!-- Header -->
+        <header id="header">
+            <div class="logo">
+                <span class="logo-icon">&#x1F427;</span>
+                <h1>PENGU</h1>
+            </div>
+            <div class="status-bar">
+                <span id="status-badge" class="badge badge-standby">STANDBY</span>
+                <span id="provider-badge" class="badge badge-provider">-</span>
+            </div>
+        </header>
+
+        <!-- Main chat area -->
+        <main id="chat-area">
+            <div id="messages">
+                <div class="message system">
+                    <div class="message-content">
+                        <p>Hello! I'm Pengu, your local-first desktop assistant.</p>
+                        <p class="hint">Type a command below or say "Hello Pengu" to activate.</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Input area -->
+        <footer id="input-area">
+            <div class="input-row">
+                <textarea id="command-input" placeholder="Type a command..." rows="1"></textarea>
+                <button id="send-btn" title="Send">&#x27A4;</button>
+                <button id="cancel-btn" title="Cancel (Esc)" class="btn-cancel">&#x2716;</button>
+            </div>
+            <div class="shortcuts">
+                <span><kbd>Enter</kbd> send</span>
+                <span><kbd>Shift+Enter</kbd> newline</span>
+                <span><kbd>Esc</kbd> cancel</span>
+            </div>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

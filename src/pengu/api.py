@@ -25,6 +25,8 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from pengu.config import PenguConfig, AssistantState, get_config
 from pengu.hardware.detect import detect_hardware, HardwareInfo
@@ -84,6 +86,12 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Serve UI static files
+import os
+_ui_static_dir = os.path.join(os.path.dirname(__file__), "ui", "static")
+if os.path.isdir(_ui_static_dir):
+    app.mount("/static", StaticFiles(directory=_ui_static_dir), name="static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -185,7 +193,12 @@ async def broadcast_state() -> None:
 # ---------------------------------------------------------------------------
 
 @app.get("/")
-async def root() -> dict[str, Any]:
+async def root():
+    """Serve the Pengu desktop UI."""
+    index_path = os.path.join(_ui_static_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    # Fallback to API status
     config = get_config_cached()
     hw = get_hardware_cached()
     return {
@@ -207,7 +220,27 @@ async def root() -> dict[str, Any]:
             "provider": "/provider",
             "command": "/command",
             "websocket": "/ws",
+            "ui": "/",
         },
+    }
+
+
+
+
+@app.get("/api/status")
+async def api_status() -> dict[str, Any]:
+    """API status endpoint (JSON)."""
+    config = get_config_cached()
+    hw = get_hardware_cached()
+    return {
+        "name": "Pengu",
+        "version": config.version,
+        "status": "running",
+        "state": _state_machine.state.value,
+        "cost_mode": config.cost_mode.value,
+        "hardware_tier": hw.tier.value,
+        "provider": _provider.name if _provider else "none",
+        "tools_count": len(_tool_registry.list_tools()),
     }
 
 

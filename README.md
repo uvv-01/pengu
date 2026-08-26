@@ -26,139 +26,106 @@ The system works when ALL API keys are removed and ALL internet is disconnected.
 
 ## Current Status
 
-| Day | Feature | Status |
-|-----|---------|--------|
-| 1 | Backend foundation, config, hardware detection, FastAPI | IMPLEMENTED |
-| 2 | Local model provider (LM Studio), intent router, command pipeline | IMPLEMENTED |
-| 3 | Real Windows OS control tools (apps, processes, filesystem, terminal, system info) | IMPLEMENTED |
-| 4 | VS Code integration | IMPLEMENTED |
-| 5 | Voice pipeline (wake word, STT, TTS) | NOT IMPLEMENTED |
-| 6 | Electron desktop UI | NOT IMPLEMENTED |
-| 7 | Browser automation | NOT IMPLEMENTED |
-| 8 | Vision/screen capture | NOT IMPLEMENTED |
-| 9 | Memory system | NOT IMPLEMENTED |
-| 10 | Full autonomous agent loop | NOT IMPLEMENTED |
+| Day | Feature | Status | Tested |
+|-----|---------|--------|--------|
+| 1 | Backend foundation, config, hardware detection, FastAPI | IMPLEMENTED | YES |
+| 2 | Local model provider (LM Studio), intent router, command pipeline | IMPLEMENTED | YES |
+| 3 | Real Windows OS control tools (apps, processes, filesystem, terminal) | IMPLEMENTED | YES |
+| 4 | VS Code integration | IMPLEMENTED | YES |
+| 5 | Memory system (SQLite), web search, browser interface | IMPLEMENTED | YES |
+| 6 | Voice + vision provider foundations | PARTIAL | INTERFACES TESTED |
+| 7 | Desktop UI (HTML/CSS/JS) | IMPLEMENTED | YES |
+| 8 | Security audit, documentation, cleanup | IMPLEMENTED | YES |
 
-### Day 3 — What Works Now
+### Capability Matrix
 
-Pengu can execute real Windows commands:
+| Feature | Status | Local | Tested | Notes |
+|---------|--------|-------|--------|-------|
+| Text commands | IMPLEMENTED | YES | YES | Via API or UI |
+| Intent router | IMPLEMENTED | YES | YES | 13 categories, deterministic first |
+| Local model | IMPLEMENTED | YES | YES | LM Studio (gemma-4-e4b) |
+| Deterministic tools | IMPLEMENTED | YES | YES | 25+ tools |
+| OS control | IMPLEMENTED | YES | YES | Apps, processes, system info |
+| Application control | IMPLEMENTED | YES | YES | Open, close, is_running |
+| Process management | IMPLEMENTED | YES | YES | List, info, terminate |
+| Filesystem | IMPLEMENTED | YES | YES | Read, write, list, search, grep |
+| Terminal safety | IMPLEMENTED | YES | YES | Command allowlist, blocked patterns |
+| VS Code integration | IMPLEMENTED | YES | YES | Open folder, file at line |
+| Git tools | IMPLEMENTED | YES | YES | Status, log, diff, branch, commit |
+| Memory system | IMPLEMENTED | YES | YES | SQLite, session + persistent |
+| Web search | IMPLEMENTED | YES* | YES | DuckDuckGo (free, no API key) |
+| Browser interface | PARTIAL | YES* | YES | Playwright abstraction |
+| STT | PARTIAL | YES | INTERFACES | faster-whisper (needs install) |
+| TTS | PARTIAL | YES* | INTERFACES | edge-tts (needs internet) |
+| Wake word | PARTIAL | YES | INTERFACES | openWakeWord (needs install) |
+| Vision | PARTIAL | YES | INTERFACES | LM Studio multimodal model |
+| Desktop UI | IMPLEMENTED | YES | YES | HTML/CSS/JS, JARVIS-style |
+| API | IMPLEMENTED | YES | YES | FastAPI + WebSocket |
+| Security | IMPLEMENTED | YES | YES | Path validation, sensitive file blocking |
+| Offline mode | IMPLEMENTED | YES | YES | Deterministic tools work offline |
 
-```
-"what CPU do I have"      → system.info       → Real hardware details
-"is VS Code running"      → application.is_running → "Yes, 23 processes"
-"open VS Code"            → application.open   → Launches VS Code
-"list files"              → filesystem.list    → Real directory listing
-"read README.md"          → filesystem.read    → File contents
-"git status"              → git.status         → Real git output
-"hello"                   → chat               → Conversational response
-```
-
-**Deterministic-first**: Most commands execute without calling any LLM. Only ambiguous
-or conversational requests use the local model.
+*Requires internet connection but no API key.
 
 ## Quick Start
 
 ```bash
-# Clone
-git clone https://github.com/uvv-01/pengu.git
-cd pengu
-
 # Install
-pip install -e ".[dev]"
+cd pengu
+pip install -e .
 
-# Check hardware
-python -m pengu.hardware.detect
-
-# Start backend
+# Run the server (opens UI at http://localhost:8420)
 python -m pengu
-# or: uvicorn pengu.api:app --host 127.0.0.1 --port 8420
+
+# Or run with specific options
+python -m pengu --host 127.0.0.1 --port 8420
 ```
+
+## What Works Now
+
+### Text Commands (via UI or API)
+
+```
+"what CPU do I have"         → system.info        → Real hardware details
+"is VS Code running"         → application.is_running → "Yes, 23 processes"
+"open VS Code"               → application.open    → Launches VS Code
+"list files"                 → filesystem.list     → Real directory listing
+"read README.md"             → filesystem.read     → File contents
+"git status"                 → git.status          → Real git output
+"remember I prefer dark mode" → memory.save        → Stored in SQLite
+"search for dark mode"       → memory.search       → Found in memory
+"search for Python docs"     → web_search          → DuckDuckGo results
+"hello"                      → chat (LLM)          → Conversational response
+"what is 2 + 2?"             → chat (LLM)          → "4"
+```
+
+### Deterministic-First Architecture
+
+Pengu does NOT call an LLM when a deterministic tool can handle the request:
+
+| Command | LLM Called? | Method |
+|---------|-------------|--------|
+| "open VS Code" | NO | application.open |
+| "git status" | NO | git.status |
+| "list files" | NO | filesystem.list |
+| "what CPU do I have" | NO | system.info |
+| "is VS Code running" | NO | application.is_running |
+| "hello" | YES (if model loaded) | LLM chat |
 
 ## Architecture
 
 ```
-Hello Pengu
-     ↓
-Wake Word Detection (openWakeWord)          [NOT IMPLEMENTED]
-     ↓
-Voice Activity Detection                    [NOT IMPLEMENTED]
-     ↓
-Speech-to-Text (faster-whisper)             [NOT IMPLEMENTED]
-     ↓
+User Input (text/voice)
+    ↓
 Intent Router (deterministic rules first)
-     ↓
-┌─────────────────────────────────────────┐
-│ SYSTEM_CONTROL  → application tools     │ ← IMPLEMENTED
-│ FILE_OPERATION  → filesystem tools      │ ← IMPLEMENTED
-│ GIT             → git tools             │ ← IMPLEMENTED
-│ TERMINAL        → safe terminal         │ ← IMPLEMENTED
-│ NETWORK         → network tools         │ ← IMPLEMENTED
-│ CODING          → local LLM             │ ← IMPLEMENTED (needs model)
-│ CHAT            → local LLM             │ ← IMPLEMENTED (needs model)
-│ VISION          → screen capture        │ [NOT IMPLEMENTED]
-│ BROWSER         → playwright            │ [NOT IMPLEMENTED]
-└─────────────────────────────────────────┘
-     ↓
-Verification
-     ↓
-Text-to-Speech (Kokoro TTS)                [NOT IMPLEMENTED]
-     ↓
-Response
+    ↓
+Tool Selection / Model Routing
+    ↓
+Tool Execution / LLM Inference
+    ↓
+Response Generation
+    ↓
+Output (text/speech/UI)
 ```
-
-## OS Control Tools (Day 3)
-
-### Application Management
-- `application.open` — Launch an application by name
-- `application.close` — Gracefully close an application
-- `application.is_running` — Check if an app is running
-- `application.list_installed` — List discovered installed apps
-- `application.list_running` — List apps with visible windows
-
-### Process Management
-- `process.list` — List processes with optional filtering
-- `process.info` — Get details for a specific PID
-- `process.terminate` — Safely terminate a process
-
-### Filesystem
-- `filesystem.read_file` — Read file contents (blocks sensitive files)
-- `filesystem.write_file` — Write to files (validates paths)
-- `filesystem.list_directory` — List directory contents
-- `filesystem.search_files` — Glob-based file search
-- `filesystem.grep` — Search file contents
-
-### Terminal (Safe)
-- `terminal.execute` — Execute commands with allowlist validation
-- Blocked: `format`, `del /s`, `shutdown`, encoded PowerShell, etc.
-
-### System Information
-- `system.info` — CPU, RAM, GPU, disk, uptime, installed tools
-
-### VS Code
-- `vscode.open_folder` — Open a project in VS Code
-- `vscode.open_file` — Open a file (optionally at a line)
-- `vscode.focus` — Bring VS Code to foreground
-
-### Git
-- `git.status`, `git.log`, `git.diff`, `git.execute`
-
-## Security Model
-
-- **Typed tools only** — LLM never executes arbitrary shell commands
-- **Command allowlist** — Only safe commands execute without confirmation
-- **Sensitive file blocking** — `.env`, SSH keys, credentials are blocked
-- **Process protection** — System-critical processes cannot be terminated
-- **Path validation** — File operations validate paths before execution
-
-## Hardware Requirements
-
-| Tier | RAM | GPU VRAM | Example |
-|------|-----|----------|---------|
-| LOW | 8 GB | none | Budget laptop |
-| MEDIUM | 16 GB | none/2GB | Standard laptop |
-| HIGH | 32+ GB | 4+ GB | Development desktop |
-
-Pengu detects your hardware and recommends appropriate models.
 
 ## Project Structure
 
@@ -166,36 +133,84 @@ Pengu detects your hardware and recommends appropriate models.
 pengu/
 ├── src/pengu/
 │   ├── __init__.py
-│   ├── api.py              # FastAPI backend
-│   ├── config.py           # Configuration system
-│   ├── state.py            # Core state machine
-│   ├── router.py           # Intent router (deterministic rules)
-│   ├── pipeline.py         # Command pipeline
-│   ├── models/             # Model abstraction
-│   │   ├── base.py         # Provider ABC
-│   │   └── lmstudio.py     # LM Studio provider
-│   ├── os/                 # OS control tools (Day 3)
-│   │   ├── app_manager.py  # Application discovery/management
+│   ├── __main__.py           # Entry point
+│   ├── api.py                # FastAPI backend + UI serving
+│   ├── config.py             # Configuration system
+│   ├── state.py              # Core state machine
+│   ├── router.py             # Intent router (deterministic rules)
+│   ├── pipeline.py           # Command pipeline
+│   ├── pipeline_handlers.py  # Memory, web, browser handlers
+│   ├── models/               # Model abstraction
+│   │   ├── base.py           # Provider ABC
+│   │   └── lmstudio.py       # LM Studio provider
+│   ├── os/                   # OS control tools
+│   │   ├── app_manager.py    # Application discovery/management
 │   │   ├── process_manager.py # Process inspection
-│   │   ├── filesystem.py   # Secure filesystem ops
-│   │   ├── terminal.py     # Safe terminal execution
-│   │   ├── system_info.py  # System information
-│   │   └── vscode.py       # VS Code integration
-│   ├── tools/              # Tool registry
-│   │   ├── registry.py     # Typed tool system
-│   │   └── deterministic.py # All deterministic tool handlers
-│   ├── hardware/           # Hardware detection
-│   ├── memory/             # Memory system (NOT IMPLEMENTED)
-│   └── voice/              # Voice pipeline (NOT IMPLEMENTED)
+│   │   ├── filesystem.py     # Secure filesystem ops
+│   │   ├── terminal.py       # Safe terminal execution
+│   │   ├── system_info.py    # System information
+│   │   └── vscode.py         # VS Code integration
+│   ├── tools/                # Tool registry
+│   │   ├── registry.py       # Typed tool system
+│   │   └── deterministic.py  # All deterministic tool handlers
+│   ├── hardware/             # Hardware detection
+│   ├── memory/               # SQLite memory system
+│   ├── web/                  # Web search + browser
+│   │   ├── search.py         # DuckDuckGo search
+│   │   └── browser.py        # Playwright browser
+│   ├── voice/                # Voice pipeline
+│   │   ├── wake_word.py      # Wake word detection
+│   │   ├── stt.py            # Speech-to-text
+│   │   └── tts.py            # Text-to-speech
+│   ├── vision/               # Vision system
+│   │   ├── provider.py       # Vision analysis
+│   │   └── screen.py         # Screen capture
+│   └── ui/                   # Desktop interface
+│       └── static/           # HTML/CSS/JS
 ├── tests/
 ├── docs/
 ├── pyproject.toml
 └── LICENSE
 ```
 
+## Configuration
+
+```bash
+# Environment variables (all optional)
+PENGU_COST_MODE=FREE_ONLY          # Default: no paid services
+PENGU_DEBUG=false
+PENGU_API_PORT=8420
+
+# Cloud providers (all optional, blocked in FREE_ONLY mode)
+GEMINI_API_KEY=...                 # Optional
+GROQ_API_KEY=...                   # Optional
+OPENROUTER_API_KEY=...             # Optional
+```
+
+## Hardware Requirements
+
+**Minimum:**
+- Windows 10/11
+- 4 GB RAM
+- CPU with 2+ cores
+- 1 GB disk space
+
+**Recommended:**
+- 8+ GB RAM
+- CPU with 4+ cores
+- GPU with 4+ GB VRAM (for faster LLM inference)
+
+**Tested on:**
+- Intel 8 cores / 12 threads
+- ~23.7 GB RAM
+- No GPU (CPU-only inference)
+
 ## Development
 
 ```bash
+# Install in development mode
+pip install -e ".[dev]"
+
 # Run tests
 pytest tests/ -v
 
@@ -205,6 +220,16 @@ uvicorn pengu.api:app --reload --host 127.0.0.1 --port 8420
 # Check hardware detection
 python -m pengu.hardware.detect
 ```
+
+## Security
+
+- No hardcoded secrets or API keys
+- Sensitive files blocked from memory storage
+- Path traversal protection in filesystem tools
+- Terminal command allowlist with blocked dangerous patterns
+- Process termination requires explicit typed tools
+- No unrestricted shell execution
+- Cloud providers optional and blocked in FREE_ONLY mode
 
 ## License
 

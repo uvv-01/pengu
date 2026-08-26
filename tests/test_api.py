@@ -24,12 +24,21 @@ class TestHealthEndpoint:
 
 class TestRootEndpoint:
     @pytest.mark.asyncio
-    async def test_root(self, client: AsyncClient):
+    async def test_root_serves_ui(self, client: AsyncClient):
+        """Root endpoint serves the Pengu desktop UI (HTML)."""
         resp = await client.get("/")
+        assert resp.status_code == 200
+        # Should return HTML (the UI page)
+        assert "html" in resp.headers.get("content-type", "") or b"Pengu" in resp.content
+
+    @pytest.mark.asyncio
+    async def test_api_status(self, client: AsyncClient):
+        """API status endpoint returns JSON."""
+        resp = await client.get("/api/status")
         assert resp.status_code == 200
         data = resp.json()
         assert data["name"] == "Pengu"
-        assert "endpoints" in data
+        assert data["status"] == "running"
 
 
 class TestConfigEndpoint:
