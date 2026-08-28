@@ -2,8 +2,8 @@
 Pengu Voice Engine — production voice assistant pipeline.
 
 Architecture:
-  STANDBY → VAD detects speech → transcribe → check "hello pengu"
-  → if wake phrase: ACKNOWLEDGE → LISTEN command → TRANSCRIBE → EXECUTE → SPEAK → STANDBY
+  STANDBY -> VAD detects speech -> transcribe -> check "hello pengu"
+  -> if wake phrase: ACKNOWLEDGE -> LISTEN command -> TRANSCRIBE -> EXECUTE -> SPEAK -> STANDBY
 
 All microphone device selection goes through AudioDeviceManager.
 There is NO duplicated device-ranking logic in this file.
@@ -29,6 +29,7 @@ from pengu.voice.audio_device_manager import (
     DeviceSelection,
     TARGET_SAMPLE_RATE,
     TARGET_CHANNELS,
+    AudioQuality,
     _downmix_to_mono,
     _resample,
 )
@@ -123,8 +124,7 @@ class MicrophoneManager:
         manager = AudioDeviceManager(
             configured_device=configured,
             target_sample_rate=TARGET_SAMPLE_RATE,
-            probe_duration=1.0,
-            num_probe_windows=3,
+            num_rounds=3,
         )
 
         selection = manager.select_best_device()
@@ -300,7 +300,6 @@ class MicrophoneManager:
             return False, "Microphone is not active."
 
         sel = self._selection
-        MIN_RMS = 50.0
 
         report_lines = [
             "MICROPHONE CHECK",
@@ -312,25 +311,28 @@ class MicrophoneManager:
             f"  Speech RMS:   {sel.speech_rms:.1f}",
             f"  Peak:         {sel.peak:.1f}",
             f"  Noise Floor:  {sel.noise_floor:.1f}",
-            f"  SNR:          {sel.snr:.1f} dB",
+            f"  SNR:          {sel.snr_db:.1f} dB",
             f"  Clipping:     {sel.clipping_percent:.4f}%",
             f"  Quality:      {sel.quality.value}",
             f"  Score:        {sel.quality_score:.1f}",
             f"  Reason:       {sel.selection_reason}",
         ]
 
-        if sel.rms < MIN_RMS:
+        # Check voice readiness
+        if not sel.voice_ready:
             # Find best alternative
             best_alt = None
             for p in sel.all_probes:
-                if p.get("device") != sel.device_index and p.get("rms", 0) > MIN_RMS:
+                if p.get("device") != sel.device_index and p.get("score", 0) > sel.quality_score:
                     if best_alt is None or p.get("score", 0) > best_alt.get("score", 0):
                         best_alt = p
 
-            report_lines.append(f"  Status:       MICROPHONE QUALITY TOO LOW")
-            report_lines.append(f"  Selected device RMS={sel.rms:.1f} is below threshold ({MIN_RMS})")
+            report_lines.append(f"  Status:       NOT READY")
+            report_lines.append(f"  Quality {sel.quality.value} is below ACCEPTABLE threshold")
+            report_lines.append(f"  SNR: {sel.snr_db:.1f} dB (need >= {MIN_SNR_DB} dB for ACCEPTABLE)")
+            report_lines.append(f"  Speech RMS: {sel.speech_rms:.1f} (need >= {MIN_SPEECH_RMS} for ACCEPTABLE)")
             if best_alt:
-                report_lines.append(f"  Recommended:  {best_alt['name']} (Device {best_alt['device']}, RMS={best_alt['rms']}, API={best_alt['api']})")
+                report_lines.append(f"  Recommended:  {best_alt['name']} (Device {best_alt['device']}, score={best_alt['score']}, API={best_alt['api']})")
             full_report = "\n".join(report_lines)
             logger.warning("mic_quality_gate_failed", report=full_report)
             return False, full_report
@@ -938,7 +940,7 @@ class VoiceEngine:
                 "calibrated": mic_level["calibrated"],
                 "quality_ok": self._mic_quality_ok,
                 "quality": sel.quality.value if sel else "unknown",
-                "snr": round(sel.snr, 1) if sel else 0,
+                "snr_db": round(sel.snr_db, 1) if sel else 0,
                 "speech_rms": round(sel.speech_rms, 1) if sel else 0,
             },
             "stt": {"status": "OK" if self._stt.is_available() else "NOT LOADED", "model": self._config.stt_model_size},

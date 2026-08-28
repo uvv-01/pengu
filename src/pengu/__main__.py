@@ -69,7 +69,7 @@ def _run_diagnostics() -> None:
 
     # Microphone — use AudioDeviceManager
     from pengu.voice.audio_device_manager import AudioDeviceManager
-    manager = AudioDeviceManager(target_sample_rate=16000, probe_duration=1.0, num_probe_windows=1)
+    manager = AudioDeviceManager(target_sample_rate=16000, num_rounds=1)
     devices = manager.enumerate_devices()
     if devices:
         print(f"  [OK] Microphones: {len(devices)} input devices found")
