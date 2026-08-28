@@ -507,9 +507,10 @@ class AdaptiveVAD:
 # ---------------------------------------------------------------------------
 
 class WakeWordDetector:
-    def __init__(self, config: VoiceConfig, stt_engine: "STTEngine") -> None:
+    def __init__(self, config: VoiceConfig, stt_engine: "STTEngine", event_loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         self._config = config
         self._stt = stt_engine
+        self._event_loop = event_loop
         self._last_wake_time: float = 0
         self._speech_active = False
         self._buffer: list[np.ndarray] = []
@@ -560,15 +561,26 @@ class WakeWordDetector:
             return None
         audio = np.concatenate(buffer)
         duration = len(audio) / self._config.sample_rate
-        if duration < 0.3:
+        # Pre-filter: skip utterances unlikely to be wake phrase
+        if duration < 0.3 or duration > 10.0:
             return None
-        logger.info("wake_check_transcribing", duration=f"{duration:.2f}s")
+        # Quick energy sanity check: skip very quiet utterances
+        rms = float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
+        if rms < 10.0:
+            return None
+        logger.info("wake_check_transcribing", duration=f"{duration:.2f}s", rms=f"{rms:.1f}")
         try:
-            loop = asyncio.new_event_loop()
-            try:
-                text = loop.run_until_complete(self._stt.transcribe(audio))
-            finally:
-                loop.close()
+            if self._event_loop and self._event_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self._stt.transcribe(audio), self._event_loop
+                )
+                text = future.result(timeout=30)
+            else:
+                loop = asyncio.new_event_loop()
+                try:
+                    text = loop.run_until_complete(self._stt.transcribe(audio))
+                finally:
+                    loop.close()
         except Exception as e:
             logger.error("wake_stt_error", error=str(e))
             return None
@@ -809,7 +821,8 @@ class VoiceEngine:
         self._microphone = MicrophoneManager(self._config)
         self._stt = STTEngine(self._config)
         self._tts = TTSEngine(self._config)
-        self._wake_detector = WakeWordDetector(self._config, self._stt)
+        # Event loop is set in start() — pass None initially, set later
+        self._wake_detector = WakeWordDetector(self._config, self._stt, event_loop=None)
         self._command_recorder = CommandRecorder(self._config)
         self._state = VoiceState.OFFLINE
         self._running = False
@@ -842,7 +855,8 @@ class VoiceEngine:
 
     async def start(self) -> None:
         self._running = True
-        self._loop = asyncio.get_event_loop()
+        self._loop = asyncio.new_event_loop()
+        self._wake_detector._event_loop = self._loop
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="voice-engine")
         self._thread.start()
         self._set_state(VoiceState.STANDBY)

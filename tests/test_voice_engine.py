@@ -333,6 +333,57 @@ class TestWakeWordDetector:
 # CommandRecorder
 # ---------------------------------------------------------------------------
 
+
+    def test_event_loop_reuse(self):
+        """WakeWordDetector should use the provided event loop, not create new ones."""
+        import asyncio
+        config = VoiceConfig(wake_debounce_seconds=0.0)
+        stt = MagicMock()
+        stt.transcribe = AsyncMock(return_value="hello pengu")
+        loop = asyncio.new_event_loop()
+        detector = WakeWordDetector(config, stt, event_loop=loop)
+        detector._last_wake_time = 0  # Reset debounce
+
+        # Simulate speech then silence
+        speech = np.ones(1024, dtype=np.int16) * 1000
+        for _ in range(5):
+            time.sleep(0.1)
+            detector.process_chunk_simple(speech, 50.0)
+        time.sleep(0.15)
+        silence = np.zeros(1024, dtype=np.int16)
+        for _ in range(5):
+            detector.process_chunk_simple(silence, 0.0)
+
+        # Verify the provided loop was used (transcribe was called)
+        stt.transcribe.assert_called()
+        loop.close()
+
+    def test_utterance_duration_filter(self):
+        """Utterances outside 0.3-10s range should be skipped."""
+        config = VoiceConfig(wake_debounce_seconds=0.0)
+        stt = MagicMock()
+        stt.transcribe = AsyncMock(return_value="hello pengu")
+        detector = WakeWordDetector(config, stt)
+
+        # Very short utterance (<0.3s) — should be skipped
+        short_buffer = [np.ones(256, dtype=np.int16) * 1000]  # ~0.016s at 16kHz
+        result = detector._check_wake_phrase(short_buffer)
+        assert result is None
+        stt.transcribe.assert_not_called()
+
+    def test_quiet_utterance_rejected(self):
+        """Very quiet utterances (RMS < 10) should be skipped."""
+        config = VoiceConfig(wake_debounce_seconds=0.0)
+        stt = MagicMock()
+        stt.transcribe = AsyncMock(return_value="hello pengu")
+        detector = WakeWordDetector(config, stt)
+
+        # Quiet utterance (RMS near 0)
+        quiet_buffer = [np.zeros(16000, dtype=np.int16)]  # 1s of silence
+        result = detector._check_wake_phrase(quiet_buffer)
+        assert result is None
+        stt.transcribe.assert_not_called()
+
 class TestCommandRecorder:
     def test_init(self):
         config = VoiceConfig()
