@@ -427,6 +427,24 @@ def test_device(
     )
 
 
+def _is_real_microphone(name: str) -> bool:
+    """
+    Determine if a device name refers to a real microphone input.
+    Returns False for system audio capture, mapper endpoints, and output devices.
+    """
+    name_lower = name.lower()
+    non_mic_patterns = [
+        "stereo mix",
+        "pc speaker",
+        "sound mapper",
+        "primary sound capture",
+    ]
+    for pattern in non_mic_patterns:
+        if pattern in name_lower:
+            return False
+    return True
+
+
 def select_best_device(
     test_results: list[DeviceTestResult],
     configured_device: Optional[int] = None,
@@ -435,37 +453,37 @@ def select_best_device(
     """
     Select the best device based on test results.
 
-    Priority:
-      1. Explicitly configured device (if valid and tested)
-      2. Windows default input device (if signal is usable)
-      3. Best tested device by quality score
+    Uses QUALITY-BASED ranking: picks the device with the strongest clean signal
+    from a real microphone endpoint.
+
+    Excludes:
+      - Stereo Mix (system audio capture, not mic input)
+      - PC Speaker (output device)
+      - Microsoft Sound Mapper (abstraction)
+      - Primary Sound Capture Driver (abstraction)
     """
-    # Filter to devices that actually produced audio
-    valid_results = [r for r in test_results if r.measurements is not None]
+    # Filter to devices that actually produced audio AND are real microphones
+    valid_results = [
+        r for r in test_results
+        if r.measurements is not None
+        and _is_real_microphone(r.device.name)
+    ]
+
+    if not valid_results:
+        # Fallback: try all results without mic filter
+        valid_results = [r for r in test_results if r.measurements is not None]
 
     if not valid_results:
         return None
 
-    # 1. Check configured device
+    # 1. Check configured device (if explicitly set)
     if configured_device is not None:
         for result in valid_results:
             if result.device.index == configured_device:
-                if result.measurements and result.measurements.quality not in (
-                    AudioQuality.UNUSABLE_SILENCE,
-                    AudioQuality.UNUSABLE_CLIPPING,
-                ):
+                if result.measurements and result.measurements.rms > 1.0:
                     return result
 
-    # 2. Check default device
-    for result in valid_results:
-        if result.is_default and result.measurements:
-            if result.measurements.quality not in (
-                AudioQuality.UNUSABLE_SILENCE,
-                AudioQuality.UNUSABLE_CLIPPING,
-            ):
-                return result
-
-    # 3. Pick best by quality ranking — NEVER select a silent device
+    # 2. Score ALL valid devices by measured quality
     quality_rank = {
         AudioQuality.EXCELLENT: 6,
         AudioQuality.GOOD: 5,
@@ -477,23 +495,45 @@ def select_best_device(
     }
 
     best = None
-    best_score = -1
+    best_score = -1.0
     for result in valid_results:
-        if result.measurements:
-            score = quality_rank.get(result.measurements.quality, 0)
-            # Strong bonus for devices with actual signal (RMS > 50)
-            if result.measurements.rms > 500:
-                score += 3
-            elif result.measurements.rms > 100:
-                score += 2
-            elif result.measurements.rms > 50:
-                score += 1
-            # Minor bonus for default device only if it has signal
-            if result.is_default and result.measurements.rms > 50:
-                score += 0.5
-            if score > best_score:
-                best_score = score
-                best = result
+        m = result.measurements
+        if not m:
+            continue
+
+        score = float(m.rms)  # Primary metric: measured RMS
+
+        # Quality modifier
+        score *= (quality_rank.get(m.quality, 0) + 1) / 4.0
+
+        # Penalty for mapper/abstraction endpoints
+        name_lower = result.device.name.lower()
+        if "sound mapper" in name_lower or "primary sound capture" in name_lower:
+            score *= 0.3
+
+        # Bonus for DirectSound API (good reliability)
+        if "DirectSound" in result.device.host_api:
+            score *= 1.1
+
+        # Bonus for WDM-KS (lowest latency)
+        if "WDM-KS" in result.device.host_api:
+            score *= 1.15
+
+        # Penalty for MME (higher latency)
+        if result.device.host_api == "MME":
+            score *= 0.8
+
+        # Penalty for UNUSABLE devices
+        if m.quality in (AudioQuality.UNUSABLE_SILENCE, AudioQuality.UNUSABLE_NOISE, AudioQuality.UNUSABLE_CLIPPING):
+            score = 0.0
+
+        # Penalty for WEAK devices
+        if m.quality == AudioQuality.WEAK:
+            score *= 0.5
+
+        if score > best_score:
+            best_score = score
+            best = result
 
     return best
 
@@ -650,14 +690,14 @@ def format_diagnostic_report(report: DiagnosticReport, verbose: bool = False) ->
         elif result.measurements:
             m = result.measurements
             quality_icon = {
-                AudioQuality.EXCELLENT: "[++]",
-                AudioQuality.GOOD: "[OK]",
-                AudioQuality.NOISY: "[~~]",
-                AudioQuality.WEAK: "[--]",
-                AudioQuality.UNUSABLE_NOISE: "[!!]",
-                AudioQuality.UNUSABLE_CLIPPING: "[!!]",
-                AudioQuality.UNUSABLE_SILENCE: "[!!]",
-            }.get(m.quality, "[??]")
+            AudioQuality.EXCELLENT: "[++]",
+            AudioQuality.GOOD: "[OK]",
+            AudioQuality.NOISY: "[~~]",
+            AudioQuality.WEAK: "[--]",
+            AudioQuality.UNUSABLE_NOISE: "[!!]",
+            AudioQuality.UNUSABLE_CLIPPING: "[!!]",
+            AudioQuality.UNUSABLE_SILENCE: "[!!]",
+        }.get(m.quality, "[??]")
 
             lines.append(f"    {quality_icon} Quality: {m.quality.value}")
             lines.append(f"       Duration:   {m.duration_seconds:.1f}s")

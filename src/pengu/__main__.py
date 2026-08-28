@@ -18,6 +18,13 @@ import sys
 
 def _run_diagnostics() -> None:
     """Run comprehensive system diagnostics without starting the voice engine."""
+    # Fix Windows console encoding for Unicode output
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     import shutil
     import platform
     import psutil
@@ -180,6 +187,13 @@ def _run_diagnostics() -> None:
 
 def _run_mic_test(duration: float = 3.0, test_all: bool = False) -> None:
     """Run microphone test with real measurements."""
+    # Fix Windows console encoding for Unicode output
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     from pengu.voice.mic_diagnostics import (
         run_microphone_diagnostics,
         format_diagnostic_report,
