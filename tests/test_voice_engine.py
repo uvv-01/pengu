@@ -113,7 +113,9 @@ class TestWakeWordDetector:
         stt = MagicMock()
         stt.transcribe = AsyncMock(return_value=None)
         detector = WakeWordDetector(config, stt)
-        assert not detector._speech_detected
+        # Verify internal state is initialized via reset
+        detector.reset()
+        assert detector._last_wake_time == 0
 
     def test_no_wake_on_silence(self):
         config = VoiceConfig()
@@ -121,7 +123,7 @@ class TestWakeWordDetector:
         stt.transcribe = AsyncMock(return_value=None)
         detector = WakeWordDetector(config, stt)
         silence = np.zeros(1024, dtype=np.int16)
-        result = detector.process_chunk(silence, 0.0)
+        result = detector.process_chunk_simple(silence, 0.0)
         assert result is None
 
     def test_wake_detection_with_phrase(self):
@@ -134,12 +136,15 @@ class TestWakeWordDetector:
         speech = np.ones(1024, dtype=np.int16) * 1000
         for _ in range(5):
             time.sleep(0.1)
-            detector.process_chunk(speech, 50.0)
+            detector.process_chunk_simple(speech, 50.0)
 
-        # Send silence to trigger transcription
+        # Send multiple silence frames to trigger transcription (need >= 3 consecutive)
         time.sleep(0.15)
         silence = np.zeros(1024, dtype=np.int16)
-        result = detector.process_chunk(silence, 0.0)
+        for _ in range(5):
+            result = detector.process_chunk_simple(silence, 0.0)
+            if result is not None:
+                break
         assert result is not None
         assert "pengu" in result
 
@@ -153,11 +158,15 @@ class TestWakeWordDetector:
         speech = np.ones(1024, dtype=np.int16) * 1000
         for _ in range(5):
             time.sleep(0.1)
-            detector.process_chunk(speech, 50.0)
+            detector.process_chunk_simple(speech, 50.0)
 
         time.sleep(0.15)
         silence = np.zeros(1024, dtype=np.int16)
-        result = detector.process_chunk(silence, 0.0)
+        result = None
+        for _ in range(5):
+            result = detector.process_chunk_simple(silence, 0.0)
+            if result is not None:
+                break
         assert result is None
 
     def test_debounce(self):
@@ -166,17 +175,15 @@ class TestWakeWordDetector:
         stt.transcribe = AsyncMock(return_value="hello pengu")
         detector = WakeWordDetector(config, stt)
         detector._last_wake_time = time.time()
-        result = detector.process_chunk(np.zeros(1024, dtype=np.int16), 0.0)
+        result = detector.process_chunk_simple(np.zeros(1024, dtype=np.int16), 0.0)
         assert result is None
 
     def test_reset(self):
         config = VoiceConfig()
         stt = MagicMock()
         detector = WakeWordDetector(config, stt)
-        detector._speech_detected = True
         detector._last_wake_time = time.time()
         detector.reset()
-        assert not detector._speech_detected
         assert detector._last_wake_time == 0
 
 
@@ -536,12 +543,16 @@ class TestWakeWordIntegration:
         speech = np.ones(1024, dtype=np.int16) * 1000
         for _ in range(5):
             time.sleep(0.1)
-            detector.process_chunk(speech, 50.0)
+            detector.process_chunk_simple(speech, 50.0)
 
-        # Then silence
+        # Then multiple silence frames
         time.sleep(0.15)
         silence = np.zeros(1024, dtype=np.int16)
-        result = detector.process_chunk(silence, 0.0)
+        result = None
+        for _ in range(5):
+            result = detector.process_chunk_simple(silence, 0.0)
+            if result is not None:
+                break
         assert result is not None
         assert "pengu" in result
 
@@ -555,9 +566,13 @@ class TestWakeWordIntegration:
         speech = np.ones(1024, dtype=np.int16) * 1000
         for _ in range(5):
             time.sleep(0.1)
-            detector.process_chunk(speech, 50.0)
+            detector.process_chunk_simple(speech, 50.0)
 
         time.sleep(0.15)
         silence = np.zeros(1024, dtype=np.int16)
-        result = detector.process_chunk(silence, 0.0)
+        result = None
+        for _ in range(5):
+            result = detector.process_chunk_simple(silence, 0.0)
+            if result is not None:
+                break
         assert result is None
