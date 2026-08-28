@@ -30,6 +30,8 @@ from pengu.voice.audio_device_manager import (
     TARGET_SAMPLE_RATE,
     TARGET_CHANNELS,
     AudioQuality,
+    MIN_SNR_DB,
+    MIN_SPEECH_RMS,
     _downmix_to_mono,
     _resample,
 )
@@ -202,6 +204,24 @@ class MicrophoneManager:
                 except Exception as e2:
                     logger.error("stream_fallback_failed", error=str(e2))
 
+            # WDM-KS and some devices don't support InputStream callbacks.
+            # Use a thread-based sd.rec() loop as fallback.
+            try:
+                self._rec_thread_stop = threading.Event()
+                self._rec_device = device
+                self._rec_sr = sr
+                self._rec_ch = ch
+                self._rec_thread = threading.Thread(
+                    target=self._rec_loop, daemon=True, name="mic-rec-fallback"
+                )
+                self._rec_thread.start()
+                self._is_active = True
+                self._device_info = sd.query_devices(device)
+                logger.info("stream_started_rec_thread", device=device, sr=sr, ch=ch)
+                return True
+            except Exception as e3:
+                logger.error("stream_all_methods_failed", error=str(e3))
+
             return False
 
         except Exception as e:
@@ -210,6 +230,8 @@ class MicrophoneManager:
 
     def stop(self) -> None:
         self._is_active = False
+        if hasattr(self, '_rec_thread_stop'):
+            self._rec_thread_stop.set()
         if self._stream:
             try:
                 self._stream.stop()
@@ -239,6 +261,31 @@ class MicrophoneManager:
             audio = _resample(audio, sel.capture_sample_rate, TARGET_SAMPLE_RATE)
 
         self._audio_queue.put(audio)
+
+    def _rec_loop(self) -> None:
+        """Fallback capture loop using blocking sd.rec() for devices
+        that don't support InputStream callbacks (e.g. WDM-KS)."""
+        chunk_frames = 1024
+        while not self._rec_thread_stop.is_set():
+            try:
+                audio = sd.rec(
+                    chunk_frames,
+                    samplerate=self._rec_sr,
+                    channels=self._rec_ch,
+                    dtype="int16",
+                    device=self._rec_device,
+                )
+                sd.wait()
+                if audio is not None and audio.size > 0:
+                    if not self._is_muted:
+                        a = audio.copy()
+                        a = _downmix_to_mono(a)
+                        if self._rec_sr != TARGET_SAMPLE_RATE:
+                            a = _resample(a, self._rec_sr, TARGET_SAMPLE_RATE)
+                        self._audio_queue.put(a)
+            except Exception:
+                if not self._rec_thread_stop.is_set():
+                    time.sleep(0.05)
 
     def get_audio(self, timeout: float = 0.1) -> Optional[np.ndarray]:
         try:
@@ -293,8 +340,9 @@ class MicrophoneManager:
 
     def check_audio_quality(self) -> tuple[bool, str]:
         """
-        Quality gate — checks if the selected device produces acceptable audio.
+        Quality gate - checks if the selected device produces acceptable audio.
         Uses the same AudioDeviceManager probe data.
+        Produces per-check breakdown showing exactly what passed/failed.
         """
         if not self._is_active or self._selection is None:
             return False, "Microphone is not active."
@@ -303,44 +351,80 @@ class MicrophoneManager:
 
         report_lines = [
             "MICROPHONE CHECK",
+            "",
             f"  Device:       {sel.device_name}",
             f"  API:          {sel.host_api}",
             f"  Sample Rate:  {sel.capture_sample_rate} Hz",
             f"  Channels:     {sel.capture_channels}",
-            f"  RMS:          {sel.rms:.1f}",
+            "",
+            f"  Noise Floor:  {sel.noise_floor:.1f}",
             f"  Speech RMS:   {sel.speech_rms:.1f}",
             f"  Peak:         {sel.peak:.1f}",
-            f"  Noise Floor:  {sel.noise_floor:.1f}",
             f"  SNR:          {sel.snr_db:.1f} dB",
             f"  Clipping:     {sel.clipping_percent:.4f}%",
             f"  Quality:      {sel.quality.value}",
             f"  Score:        {sel.quality_score:.1f}",
-            f"  Reason:       {sel.selection_reason}",
+            "",
         ]
 
-        # Check voice readiness
-        if not sel.voice_ready:
-            # Find best alternative
-            best_alt = None
-            for p in sel.all_probes:
-                if p.get("device") != sel.device_index and p.get("score", 0) > sel.quality_score:
-                    if best_alt is None or p.get("score", 0) > best_alt.get("score", 0):
-                        best_alt = p
+        # --- Per-check gates ---
+        checks = []
 
-            report_lines.append(f"  Status:       NOT READY")
-            report_lines.append(f"  Quality {sel.quality.value} is below ACCEPTABLE threshold")
-            report_lines.append(f"  SNR: {sel.snr_db:.1f} dB (need >= {MIN_SNR_DB} dB for ACCEPTABLE)")
-            report_lines.append(f"  Speech RMS: {sel.speech_rms:.1f} (need >= {MIN_SPEECH_RMS} for ACCEPTABLE)")
-            if best_alt:
-                report_lines.append(f"  Recommended:  {best_alt['name']} (Device {best_alt['device']}, score={best_alt['score']}, API={best_alt['api']})")
+        checks.append(("Device opens", "OK", True))
+        checks.append(("Signal detected", "OK" if sel.rms > 0 else "FAIL", sel.rms > 0))
+        checks.append(("Speech detected", "OK" if sel.speech_detected else "FAIL", sel.speech_detected))
+        snr_ok = sel.snr_db >= MIN_SNR_DB
+        checks.append((f"SNR >= {MIN_SNR_DB} dB", "OK" if snr_ok else "FAIL", snr_ok))
+        rms_ok = sel.speech_rms >= MIN_SPEECH_RMS
+        checks.append((f"Speech RMS >= {MIN_SPEECH_RMS}", "OK" if rms_ok else "FAIL", rms_ok))
+        clip_ok = sel.clipping_percent < 1.0
+        checks.append(("Clipping < 1%", "OK" if clip_ok else "WARN", clip_ok))
+        quality_ok = sel.quality.is_voice_ready
+        quality_hw = sel.quality.is_hardware_ok
+        if quality_ok:
+            checks.append(("Quality >= ACCEPTABLE", "OK", True))
+        elif quality_hw:
+            checks.append(("Hardware OK (no speech observed)", "OK", True))
+            checks.append(("Speech evidence", "WARN", False))
+        else:
+            checks.append(("Quality >= ACCEPTABLE", "FAIL", False))
+
+        all_passed = all(c[2] for c in checks)
+
+        for name, status, _ in checks:
+            icon = "[OK]" if status == "OK" else f"[{status}]"
+            report_lines.append(f"  {icon} {name}")
+
+        report_lines.append("")
+
+        if all_passed:
+            report_lines.append("  Status:       READY")
             full_report = "\n".join(report_lines)
-            logger.warning("mic_quality_gate_failed", report=full_report)
-            return False, full_report
+            logger.info("mic_quality_gate_passed", report=full_report)
+            return True, full_report
 
-        report_lines.append(f"  Status:       READY")
+        # --- NOT READY: provide recommendations ---
+        report_lines.append("  Status:       NOT READY")
+        report_lines.append("")
+        failed = [name for name, status, ok in checks if not ok]
+        if failed:
+            report_lines.append("  WHAT FAILED:")
+            for f_name in failed:
+                report_lines.append(f"    - {f_name}")
+
+        report_lines.append("")
+        best_alt = None
+        for p in sel.all_probes:
+            if p.get("device") != sel.device_index and p.get("score", 0) > sel.quality_score:
+                if best_alt is None or p.get("score", 0) > best_alt.get("score", 0):
+                    best_alt = p
+        if best_alt:
+            report_lines.append("  RECOMMENDED:")
+            report_lines.append("    " + best_alt["name"] + " (Device " + str(best_alt["device"]) + ", score=" + str(best_alt["score"]) + ", API=" + best_alt["api"] + ")")
+
         full_report = "\n".join(report_lines)
-        logger.info("mic_quality_gate_passed", report=full_report)
-        return True, full_report
+        logger.warning("mic_quality_gate_failed", report=full_report)
+        return False, full_report
 
     @property
     def is_active(self) -> bool:

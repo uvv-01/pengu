@@ -52,7 +52,9 @@ def run_microphone_diagnostics(
         configured_device=configured_device,
         target_sample_rate=TARGET_SAMPLE_RATE,
         num_rounds=num_rounds,
+        prompt_user=True,
     )
+    
 
     # Enumerate devices
     devices = manager.enumerate_devices()
@@ -102,12 +104,18 @@ def format_diagnostic_report(result: dict, verbose: bool = False) -> str:
             AudioQuality.EXCELLENT: "[++]",
             AudioQuality.GOOD:      "[OK]",
             AudioQuality.ACCEPTABLE:"[~~]",
+            AudioQuality.NO_SPEECH: "[..]",
             AudioQuality.POOR:      "[--]",
             AudioQuality.UNUSABLE:  "[!!]",
         }.get(probe.quality, "[??]")
 
         # Voice readiness
-        voice_status = "VOICE READY" if probe.quality.is_voice_ready else "NOT VOICE READY"
+        if probe.quality.is_voice_ready:
+            voice_status = "VOICE READY"
+        elif probe.quality.is_hardware_ok:
+            voice_status = "HARDWARE OK (no speech observed)"
+        else:
+            voice_status = "NOT VOICE READY"
 
         lines.append(f"  Device {probe.device_index}: {probe.device_name}")
         lines.append(f"    {quality_icon} Quality: {probe.quality.value} ({voice_status})")

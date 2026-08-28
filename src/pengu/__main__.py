@@ -260,6 +260,259 @@ def _run_benchmark_models() -> None:
     asyncio.run(_benchmark())
 
 
+
+def _run_mic_stt_test() -> None:
+    """Test the complete MIC -> preprocessing -> STT pipeline.
+
+    Has two capture phases:
+      Phase A: silence baseline (2 seconds)
+      Phase B: user speech (3 seconds)
+
+    Then preprocesses speech and sends to faster-whisper.
+    """
+    _fix_encoding()
+    import time as _time
+    import numpy as np
+    import sounddevice as sd
+
+    print("=" * 60)
+    print("  PENGU MIC-TO-STT AUDIO PATH TEST")
+    print("=" * 60)
+    print()
+
+    # ---- Step 1: Select microphone ----
+    print("  Step 1: Selecting microphone...")
+    from pengu.voice.audio_device_manager import (
+        AudioDeviceManager, TARGET_SAMPLE_RATE,
+        _downmix_to_mono, _resample, _calculate_snr_db,
+    )
+
+    configured = None
+    env_device = os.environ.get("PENGU_MIC_DEVICE")
+    if env_device:
+        try:
+            configured = int(env_device)
+        except ValueError:
+            pass
+
+    manager = AudioDeviceManager(
+        configured_device=configured,
+        target_sample_rate=TARGET_SAMPLE_RATE,
+        num_rounds=3,
+    )
+    selection = manager.select_best_device()
+
+    if selection is None:
+        print("  [FAIL] No suitable microphone found.")
+        print("=" * 60)
+        return
+
+    device = selection.device_index
+    sr = selection.capture_sample_rate
+    ch = selection.capture_channels
+
+    print()
+    print(f"  Device:       {selection.device_name}")
+    print(f"  API:          {selection.host_api}")
+    print(f"  Device Index: {device}")
+    print(f"  Sample Rate:  {sr} Hz")
+    print(f"  Channels:     {ch}")
+    print(f"  Quality:      {selection.quality.value}")
+    print(f"  Probe SNR:    {selection.snr_db:.1f} dB")
+    print()
+
+    # ---- Step 2: Silence baseline ----
+    print("  Step 2: Silence baseline")
+    print()
+    print("  REMAIN SILENT for 2 seconds...")
+    print("  (do not speak yet)")
+    print()
+
+    silence_frames = int(2.0 * sr)
+    try:
+        silence_audio = sd.rec(
+            silence_frames, samplerate=sr, channels=ch,
+            dtype="int16", device=device,
+        )
+        sd.wait()
+    except Exception as e:
+        print(f"  [FAIL] Silence capture error: {e}")
+        print("=" * 60)
+        return
+
+    noise_rms = float(np.sqrt(np.mean(silence_audio.astype(np.float32) ** 2)))
+    noise_peak = float(np.max(np.abs(silence_audio.astype(np.float32))))
+
+    # Estimate noise floor from frame RMS
+    flat = silence_audio.flatten().astype(np.float32)
+    frame_size = 1024
+    frame_rms_vals = []
+    for i in range(0, len(flat) - frame_size + 1, frame_size):
+        frame = flat[i:i+frame_size]
+        frame = frame - np.mean(frame)
+        rms = float(np.sqrt(np.mean(frame ** 2)))
+        if np.isfinite(rms):
+            frame_rms_vals.append(rms)
+    noise_floor = max(float(np.percentile(frame_rms_vals, 75)) if frame_rms_vals else 0.1, 0.1)
+
+    print(f"  Noise RMS:    {noise_rms:.1f}")
+    print(f"  Noise Peak:   {noise_peak:.1f}")
+    print(f"  Noise Floor:  {noise_floor:.1f}")
+    print()
+
+    # ---- Step 3: Speech capture ----
+    print("  Step 3: Speech capture")
+    print()
+    print("  NOW SPEAK CLEARLY:")
+    print()
+    print('      "Pengu microphone test"')
+    print()
+    print("  Recording for 3 seconds...")
+    print()
+
+    speech_frames = int(3.0 * sr)
+    try:
+        speech_audio = sd.rec(
+            speech_frames, samplerate=sr, channels=ch,
+            dtype="int16", device=device,
+        )
+        sd.wait()
+    except Exception as e:
+        print(f"  [FAIL] Speech capture error: {e}")
+        print("=" * 60)
+        return
+
+    raw_rms = float(np.sqrt(np.mean(speech_audio.astype(np.float32) ** 2)))
+    raw_peak = float(np.max(np.abs(speech_audio.astype(np.float32))))
+
+    # Speech detection: RMS must exceed noise by 3x and be above MIN_SPEECH_RMS
+    speech_detected = (raw_rms >= 100.0 and raw_rms >= noise_floor * 3.0)
+
+    # SNR from the two captures
+    if speech_detected and noise_floor >= 0.1:
+        snr_db = _calculate_snr_db(raw_rms, noise_floor)
+    else:
+        snr_db = 0.0
+
+    print(f"  Raw RMS:      {raw_rms:.1f}")
+    print(f"  Raw Peak:     {raw_peak:.1f}")
+    print(f"  Speech Detected: {'YES' if speech_detected else 'NO'}")
+    print(f"  SNR:          {snr_db:.1f} dB")
+    print()
+
+    # ---- Step 4: Preprocessing ----
+    print("  Step 4: Preprocessing")
+    print()
+
+    processed = _downmix_to_mono(speech_audio)
+    if sr != TARGET_SAMPLE_RATE:
+        processed = _resample(processed, sr, TARGET_SAMPLE_RATE)
+
+    proc_rms = float(np.sqrt(np.mean(processed.astype(np.float32) ** 2)))
+    proc_peak = float(np.max(np.abs(processed.astype(np.float32))))
+
+    print(f"  Input SR:     {sr} Hz")
+    print(f"  Input Ch:     {ch}")
+    print(f"  Output SR:    {TARGET_SAMPLE_RATE} Hz")
+    print(f"  Output Ch:    1 (mono)")
+    print(f"  Processed RMS: {proc_rms:.1f}")
+    print(f"  Processed Peak: {proc_peak:.1f}")
+    print()
+
+    # ---- Step 5: STT ----
+    print("  Step 5: STT transcription")
+    print()
+
+    stt_text = None
+    stt_latency = 0.0
+    stt_model_name = "tiny"
+
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel(stt_model_name, device="cpu", compute_type="int8")
+        audio_f = processed.astype(np.float32) / 32768.0
+        t0 = _time.time()
+        segments, info = model.transcribe(
+            audio_f, language="en", beam_size=5, vad_filter=True,
+        )
+        parts = [seg.text.strip() for seg in segments]
+        stt_text = " ".join(parts).strip()
+        stt_latency = _time.time() - t0
+
+        print(f"  STT Model:    {stt_model_name}")
+        print(f"  STT Latency:  {stt_latency:.2f}s")
+        print(f"  Language:     {info.language} (prob={info.language_probability:.2f})")
+        print("  Transcription: " + repr(stt_text) if stt_text else "  Transcription: (empty)")
+
+    except ImportError:
+        print("  [SKIP] faster-whisper not installed.")
+    except Exception as e:
+        print(f"  [FAIL] STT error: {e}")
+
+    print()
+
+    # ---- Summary ----
+    print("=" * 60)
+    print()
+
+    checks = [
+        ("Microphone selected", selection is not None),
+        ("Silence baseline captured", noise_rms >= 0),
+        ("Speech captured", raw_rms > 0),
+        ("Speech detected", speech_detected),
+        ("Preprocessing OK", proc_rms > 0),
+    ]
+
+    if stt_text is not None:
+        checks.append(("STT transcription", bool(stt_text)))
+    else:
+        checks.append(("STT transcription", False))
+
+    for name, ok in checks:
+        icon = "[OK]" if ok else "[FAIL]"
+        print(f"  {icon} {name}")
+
+    print()
+    print("  --- MEASUREMENTS ---")
+    print(f"  Device:        {selection.device_name}")
+    print(f"  API:           {selection.host_api}")
+    print(f"  Device Index:  {device}")
+    print(f"  Input SR:      {sr} Hz")
+    print(f"  Input Ch:      {ch}")
+    print(f"  Output SR:     {TARGET_SAMPLE_RATE} Hz")
+    print(f"  Output Ch:     1 (mono)")
+    print(f"  Noise RMS:     {noise_rms:.1f}")
+    print(f"  Noise Floor:   {noise_floor:.1f}")
+    print(f"  Raw RMS:       {raw_rms:.1f}")
+    print(f"  Raw Peak:      {raw_peak:.1f}")
+    print(f"  Processed RMS: {proc_rms:.1f}")
+    print(f"  Processed Peak:{proc_peak:.1f}")
+    print(f"  SNR:           {snr_db:.1f} dB")
+    print(f"  STT Model:     {stt_model_name}")
+    print(f"  STT Latency:   {stt_latency:.2f}s")
+    print("  Transcription: " + repr(stt_text) if stt_text else "  Transcription: (empty)")
+    print()
+
+    if stt_text and speech_detected:
+        print("  STATUS: COMPLETE")
+        print("  MIC -> preprocessing -> STT pipeline functional.")
+        print("  Real speech was captured and transcribed.")
+    elif not speech_detected:
+        print("  STATUS: SPEECH NOT DETECTED")
+        print("  No significant speech was detected above noise floor.")
+        print("  Try speaking louder or closer to the microphone.")
+    elif stt_text is None:
+        print("  STATUS: STT UNAVAILABLE")
+        print("  MIC and preprocessing work, but STT could not run.")
+    else:
+        print("  STATUS: INCOMPLETE")
+        print("  STT returned empty transcription.")
+        print("  Try speaking more clearly during the capture window.")
+
+    print()
+    print("=" * 60)
+
+
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -272,6 +525,7 @@ def main() -> None:
     parser.add_argument("--hardware", action="store_true", help="Show hardware detection report and exit")
     parser.add_argument("--mic-duration", type=float, default=3.0, help="Duration for mic test recording (seconds)")
     parser.add_argument("--test-all-mics", action="store_true", help="Test all microphone devices")
+    parser.add_argument("--mic-stt-test", action="store_true", help="Test mic-to-STT audio path")
 
     args = parser.parse_args()
 
@@ -279,6 +533,8 @@ def main() -> None:
         _run_diagnostics()
     elif args.mic_test:
         _run_mic_test(duration=args.mic_duration, test_all=args.test_all_mics)
+    elif args.mic_stt_test:
+        _run_mic_stt_test()
     elif args.benchmark_models:
         _run_benchmark_models()
     elif args.hardware:

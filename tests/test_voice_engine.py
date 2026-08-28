@@ -109,6 +109,142 @@ class TestMicrophoneManager:
             mic.stop()
 
 
+# Regression: check_audio_quality must not raise NameError for MIN_SNR_DB / MIN_SPEECH_RMS
+    def test_check_audio_quality_not_ready_path(self):
+        """Regression test: check_audio_quality() must execute both quality-gate
+        paths without raising NameError for MIN_SNR_DB or MIN_SPEECH_RMS."""
+        from pengu.voice.audio_device_manager import (
+            AudioQuality, DeviceSelection, MIN_SNR_DB, MIN_SPEECH_RMS,
+        )
+
+        config = VoiceConfig()
+        mic = MicrophoneManager(config)
+
+        # Simulate a NOT-READY selection (low SNR, no speech)
+        bad_sel = DeviceSelection(
+            device_index=1,
+            device_name="Bad Mic",
+            host_api="MME",
+            max_channels=2,
+            native_sample_rate=44100,
+            noise_floor=179.0,
+            noise_rms=356.8,
+            speech_rms=10.0,       # below MIN_SPEECH_RMS
+            speech_peak=200.0,
+            rms=10.0,
+            peak=200.0,
+            snr_db=0.0,            # below MIN_SNR_DB
+            clipping_percent=0.0,
+            quality=AudioQuality.POOR,
+            quality_score=16.0,
+            selection_reason="low SNR",
+            voice_ready=False,
+            speech_detected=False,
+        )
+
+        mic._is_active = True
+        mic._selection = bad_sel
+
+        ok, report = mic.check_audio_quality()
+        assert ok is False
+        assert "NOT READY" in report
+        assert "MIN_SNR_DB" not in report  # must use value, not name
+        assert "6.0" in report              # MIN_SNR_DB value
+        assert "100.0" in report            # MIN_SPEECH_RMS value
+
+    def test_check_audio_quality_ready_path(self):
+        """Regression test: check_audio_quality() READY path must not raise NameError."""
+        from pengu.voice.audio_device_manager import (
+            AudioQuality, DeviceSelection,
+        )
+
+        config = VoiceConfig()
+        mic = MicrophoneManager(config)
+
+        good_sel = DeviceSelection(
+            device_index=5,
+            device_name="Good Mic",
+            host_api="DirectSound",
+            max_channels=4,
+            native_sample_rate=44100,
+            noise_floor=0.5,
+            noise_rms=3.6,
+            speech_rms=385.0,
+            speech_peak=4943.0,
+            rms=385.0,
+            peak=4943.0,
+            snr_db=21.0,
+            clipping_percent=0.0,
+            quality=AudioQuality.GOOD,
+            quality_score=1220.0,
+            selection_reason="high SNR, speech detected",
+            voice_ready=True,
+            speech_detected=True,
+        )
+
+        mic._is_active = True
+        mic._selection = good_sel
+
+        ok, report = mic.check_audio_quality()
+        assert ok is True
+        assert "READY" in report
+
+    def test_check_audio_quality_not_active(self):
+        """check_audio_quality returns False when mic is inactive."""
+        config = VoiceConfig()
+        mic = MicrophoneManager(config)
+        ok, report = mic.check_audio_quality()
+        assert ok is False
+        assert "not active" in report.lower()
+
+    def test_check_audio_quality_per_check_gates(self):
+        from pengu.voice.audio_device_manager import AudioQuality, DeviceSelection
+        config = VoiceConfig()
+        mic = MicrophoneManager(config)
+        bad_sel = DeviceSelection(
+            device_index=1, device_name='Test', host_api='MME',
+            max_channels=2, native_sample_rate=44100,
+            noise_floor=5.0, noise_rms=5.0,
+            speech_rms=10.0, speech_peak=100.0,
+            rms=10.0, peak=100.0,
+            snr_db=0.0, clipping_percent=0.0,
+            quality=AudioQuality.POOR, quality_score=0.0,
+            selection_reason='test', voice_ready=False, speech_detected=False,
+        )
+        mic._is_active = True
+        mic._selection = bad_sel
+        ok, report = mic.check_audio_quality()
+        assert ok is False
+        assert '[FAIL] Speech detected' in report
+        assert '[FAIL] SNR >=' in report
+        assert 'WHAT FAILED' in report
+        assert 'Status:       NOT READY' in report
+
+    def test_check_audio_quality_all_ok(self):
+        from pengu.voice.audio_device_manager import AudioQuality, DeviceSelection
+        config = VoiceConfig()
+        mic = MicrophoneManager(config)
+        good_sel = DeviceSelection(
+            device_index=5, device_name='Good', host_api='DirectSound',
+            max_channels=4, native_sample_rate=44100,
+            noise_floor=0.5, noise_rms=3.0,
+            speech_rms=400.0, speech_peak=5000.0,
+            rms=400.0, peak=5000.0,
+            snr_db=21.0, clipping_percent=0.0,
+            quality=AudioQuality.GOOD, quality_score=1200.0,
+            selection_reason='test', voice_ready=True, speech_detected=True,
+        )
+        mic._is_active = True
+        mic._selection = good_sel
+        ok, report = mic.check_audio_quality()
+        assert ok is True
+        assert '[OK] Device opens' in report
+        assert '[OK] Speech detected' in report
+        assert '[OK] SNR >=' in report
+        assert '[OK] Clipping' in report
+        assert '[OK] Quality' in report
+        assert 'Status:       READY' in report
+
 # ---------------------------------------------------------------------------
 # WakeWordDetector
 # ---------------------------------------------------------------------------
@@ -582,3 +718,121 @@ class TestWakeWordIntegration:
             if result is not None:
                 break
         assert result is None
+
+
+# =========================================================================
+# Regression tests for AudioDeviceManager, SNR, quality gate
+# =========================================================================
+
+class TestAudioDeviceManager:
+    def test_no_speech_not_poor(self):
+        """A device that opens but has no speech should be NO_SPEECH, not POOR."""
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality
+        q = _classify_quality(
+            snr_db=0.0, speech_rms=30.0, clipping_pct=0.0,
+            noise_floor=0.5, speech_detected=False, can_open=True,
+        )
+        assert q == AudioQuality.NO_SPEECH
+
+    def test_no_speech_low_noise_hardware_ok(self):
+        from pengu.voice.audio_device_manager import AudioQuality
+        assert AudioQuality.NO_SPEECH.is_hardware_ok is True
+        assert AudioQuality.NO_SPEECH.is_voice_ready is False
+
+    def test_poor_requires_real_issues(self):
+        """POOR should mean actual quality issues, not just no speech."""
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality
+        # Device cannot open -> POOR
+        q = _classify_quality(
+            snr_db=0.0, speech_rms=0.0, clipping_pct=0.0,
+            noise_floor=0.1, speech_detected=False, can_open=False,
+        )
+        assert q == AudioQuality.POOR
+
+    def test_snr_zero_with_speech_is_poor(self):
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality
+        q = _classify_quality(
+            snr_db=0.0, speech_rms=300.0, clipping_pct=0.0,
+            noise_floor=5.0, speech_detected=True,
+        )
+        assert q == AudioQuality.POOR
+
+
+    def test_snr_calculation_normal(self):
+        from pengu.voice.audio_device_manager import _calculate_snr_db
+        snr = _calculate_snr_db(speech_rms=500.0, noise_floor=5.0)
+        assert abs(snr - 40.0) < 0.1
+
+    def test_snr_calculation_zero_noise(self):
+        from pengu.voice.audio_device_manager import _calculate_snr_db
+        snr = _calculate_snr_db(speech_rms=500.0, noise_floor=0.0)
+        assert snr == 0.0
+
+    def test_snr_calculation_zero_speech(self):
+        from pengu.voice.audio_device_manager import _calculate_snr_db
+        snr = _calculate_snr_db(speech_rms=0.0, noise_floor=5.0)
+        assert snr == 0.0
+
+    def test_snr_calculation_below_min_noise(self):
+        from pengu.voice.audio_device_manager import _calculate_snr_db, MIN_NOISE_FLOOR
+        snr = _calculate_snr_db(speech_rms=500.0, noise_floor=MIN_NOISE_FLOOR * 0.5)
+        assert snr == 0.0
+
+    def test_snr_calculation_equal_signal_noise(self):
+        from pengu.voice.audio_device_manager import _calculate_snr_db
+        snr = _calculate_snr_db(speech_rms=100.0, noise_floor=100.0)
+        assert snr == 0.0
+
+    def test_snr_zero_cannot_become_ready(self):
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality
+        for speech in [100, 300, 500, 1000]:
+            q = _classify_quality(snr_db=0.0, speech_rms=speech, clipping_pct=0.0, noise_floor=5.0, speech_detected=True)
+            assert q in (AudioQuality.POOR, AudioQuality.UNUSABLE)
+
+    def test_snr_below_min_cannot_become_ready(self):
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality, MIN_SNR_DB
+        q = _classify_quality(snr_db=MIN_SNR_DB - 0.1, speech_rms=500.0, clipping_pct=0.0, noise_floor=5.0, speech_detected=True)
+        assert q == AudioQuality.POOR
+
+    def test_speech_not_detected_cannot_become_ready(self):
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality
+        # No speech -> NO_SPEECH, NOT voice_ready
+        q = _classify_quality(snr_db=30.0, speech_rms=500.0, clipping_pct=0.0, noise_floor=5.0, speech_detected=False)
+        assert q == AudioQuality.NO_SPEECH
+        assert q.is_voice_ready is False
+
+    def test_excellent_quality_thresholds(self):
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality
+        q = _classify_quality(snr_db=25.0, speech_rms=600.0, clipping_pct=0.0, noise_floor=5.0, speech_detected=True)
+        assert q == AudioQuality.EXCELLENT
+
+    def test_good_quality_thresholds(self):
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality
+        q = _classify_quality(snr_db=13.0, speech_rms=250.0, clipping_pct=0.0, noise_floor=5.0, speech_detected=True)
+        assert q == AudioQuality.GOOD
+
+    def test_acceptable_quality_thresholds(self):
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality, MIN_SNR_DB
+        q = _classify_quality(snr_db=MIN_SNR_DB + 0.1, speech_rms=110.0, clipping_pct=0.0, noise_floor=5.0, speech_detected=True)
+        assert q == AudioQuality.ACCEPTABLE
+
+    def test_severe_clipping_unusable(self):
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality
+        q = _classify_quality(snr_db=30.0, speech_rms=500.0, clipping_pct=2.0, noise_floor=5.0, speech_detected=True)
+        assert q == AudioQuality.UNUSABLE
+
+    def test_degenerate_signal_unusable(self):
+        from pengu.voice.audio_device_manager import _classify_quality, AudioQuality
+        # No speech, device opens, low noise -> NO_SPEECH
+        q = _classify_quality(snr_db=0.0, speech_rms=0.5, clipping_pct=0.0, noise_floor=0.5, speech_detected=False)
+        assert q == AudioQuality.NO_SPEECH
+        # speech_detected=True + low signal = UNUSABLE
+        q2 = _classify_quality(snr_db=0.0, speech_rms=0.5, clipping_pct=0.0, noise_floor=0.5, speech_detected=True)
+        assert q2 == AudioQuality.UNUSABLE
+
+    def test_constants_consistency(self):
+        from pengu.voice.audio_device_manager import MIN_SNR_DB, MIN_SPEECH_RMS
+        from pengu.voice.engine import MIN_SNR_DB as E_SNR, MIN_SPEECH_RMS as E_RMS
+        from pengu.voice.mic_diagnostics import MIN_SNR_DB as D_SNR, MIN_SPEECH_RMS as D_RMS
+        assert MIN_SNR_DB == E_SNR == D_SNR == 6.0
+        assert MIN_SPEECH_RMS == E_RMS == D_RMS == 100.0
