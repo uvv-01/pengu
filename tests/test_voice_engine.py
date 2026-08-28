@@ -96,11 +96,17 @@ class TestMicrophoneManager:
         assert "avg_rms" in level
         assert "peak" in level
 
-    def test_select_device_returns_int_or_none(self):
+    def test_select_and_start_returns_bool(self):
         config = VoiceConfig()
         mic = MicrophoneManager(config)
-        device = mic._select_best_device()
-        assert device is None or isinstance(device, int)
+        # select_and_start probes all devices and opens a stream
+        # On CI without a real mic, this may return False
+        result = mic.select_and_start()
+        assert isinstance(result, bool)
+        if result:
+            assert mic.is_active
+            assert mic.selection is not None
+            mic.stop()
 
 
 # ---------------------------------------------------------------------------
