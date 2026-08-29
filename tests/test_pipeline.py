@@ -77,10 +77,10 @@ class TestPipelineClassification:
         assert result.intent.category == TaskCategory.FILE_OPERATION
 
     @pytest.mark.asyncio
-    async def test_vision_not_implemented(self, pipeline):
+    async def test_vision_handled(self, pipeline):
         result = await pipeline.process("look at my screen")
         assert result.intent.category == TaskCategory.VISION
-        assert "not yet implemented" in result.response.lower() or "NOT IMPLEMENTED" in result.error
+        assert result.response  # Should produce a response (screenshot or vision analysis)
 
     @pytest.mark.asyncio
     async def test_browser_not_implemented(self, pipeline):

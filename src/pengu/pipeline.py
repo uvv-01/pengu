@@ -168,35 +168,17 @@ class CommandPipeline:
         elif category == TaskCategory.CODING:
             return await self._handle_with_model(text, intent, task_id, steps, coding=True)
 
-        # VISION → placeholder for Day 3+
+        # VISION → screen capture and analysis
         elif category == TaskCategory.VISION:
-            return PipelineResult(
-                text=text,
-                intent=intent,
-                response="Vision/screen capture is not yet implemented.",
-                provider="deterministic",
-                error="NOT IMPLEMENTED",
-            )
+            return await self._handle_vision(text, intent, task_id, steps)
 
-        # BROWSER → placeholder for Day 3+
+        # BROWSER → browser automation
         elif category == TaskCategory.BROWSER:
-            return PipelineResult(
-                text=text,
-                intent=intent,
-                response="Browser automation is not yet implemented.",
-                provider="deterministic",
-                error="NOT IMPLEMENTED",
-            )
+            return await self._handle_browser(text, intent, task_id, steps)
 
-        # WEB_SEARCH → placeholder for Day 3+
+        # WEB_SEARCH → web search
         elif category == TaskCategory.WEB_SEARCH:
-            return PipelineResult(
-                text=text,
-                intent=intent,
-                response="Web search is not yet implemented.",
-                provider="deterministic",
-                error="NOT IMPLEMENTED",
-            )
+            return await self._handle_web_search(text, intent, task_id, steps)
 
         # MEDIA → placeholder for future
         elif category == TaskCategory.MEDIA:
@@ -208,15 +190,9 @@ class CommandPipeline:
                 error="NOT IMPLEMENTED",
             )
 
-        # MEMORY → placeholder for future
+        # MEMORY → memory operations
         elif category == TaskCategory.MEMORY:
-            return PipelineResult(
-                text=text,
-                intent=intent,
-                response="Memory system is not yet implemented.",
-                provider="deterministic",
-                error="NOT IMPLEMENTED",
-            )
+            return await self._handle_memory(text, intent, task_id, steps)
 
         # MULTI_STEP_AGENT → LLM for planning
         elif category == TaskCategory.MULTI_STEP_AGENT:
@@ -864,6 +840,159 @@ class CommandPipeline:
             provider=response.provider,
             model=response.model,
         )
+
+    async def _handle_web_search(
+        self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
+    ) -> PipelineResult:
+        """Handle web search operations using DuckDuckGo."""
+        steps.append({"step": "web_search", "status": "running"})
+
+        query = intent.extracted_target
+        if not query:
+            import re
+            match = re.search(
+                r"(?:search|google|look\s+up|find)\s+(?:for\s+)?(.+)",
+                text, re.IGNORECASE,
+            )
+            if match:
+                query = match.group(1).strip()
+
+        if not query:
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response="What would you like me to search for?",
+                provider="deterministic",
+            )
+
+        try:
+            from pengu.web.search import get_search_provider
+            provider = get_search_provider()
+            results = await provider.search(query, max_results=5)
+
+            if results:
+                lines = [
+                    f"{i+1}. {r.title}\n   {r.url}\n   {r.snippet}"
+                    for i, r in enumerate(results)
+                ]
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response=f"Search results for '{query}':\n\n" + "\n\n".join(lines),
+                    provider="deterministic", tool_used="web_search",
+                )
+            else:
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response=f"No results found for '{query}'.",
+                    provider="deterministic", tool_used="web_search",
+                )
+        except Exception as e:
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Web search failed: {e}",
+                provider="deterministic", error=str(e),
+            )
+
+    async def _handle_browser(
+        self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
+    ) -> PipelineResult:
+        """Handle browser operations."""
+        steps.append({"step": "browser", "status": "running"})
+
+        import re
+        url_match = re.search(r"(https?://\S+)", text)
+        if url_match:
+            url = url_match.group(1)
+        else:
+            # Try to find a URL-like target
+            target = intent.extracted_target
+            if target and not target.startswith("http"):
+                url = f"https://{target}"
+            else:
+                steps[-1]["status"] = "error"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response="What URL would you like me to open?",
+                    provider="deterministic",
+                )
+
+        try:
+            from pengu.web.browser import get_browser
+            browser = get_browser()
+            page = await browser.open(url)
+            steps[-1]["status"] = "complete"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Opened {page.title} ({url})",
+                provider="deterministic", tool_used="browser.open",
+            )
+        except Exception as e:
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Browser error: {e}",
+                provider="deterministic", error=str(e),
+            )
+
+    async def _handle_vision(
+        self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
+    ) -> PipelineResult:
+        """Handle vision/screen capture and analysis."""
+        steps.append({"step": "vision", "status": "running"})
+
+        try:
+            from pengu.vision.screen import get_screen_capture
+            from pengu.vision.provider import get_vision_provider
+
+            # Capture screenshot
+            screen = get_screen_capture()
+            screenshot = await screen.capture()
+            if not screenshot:
+                steps[-1]["status"] = "error"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response="Could not capture the screen.",
+                    provider="deterministic",
+                )
+
+            # Analyze with vision model
+            vision = get_vision_provider()
+            if vision.is_available():
+                result = await vision.analyze_screenshot(
+                    screenshot.path,
+                    prompt="Describe what you see on this screen. Focus on visible text, buttons, and UI elements.",
+                )
+                if result:
+                    steps[-1]["status"] = "complete"
+                    return PipelineResult(
+                        text=text, intent=intent,
+                        response=result.description,
+                        provider="deterministic", tool_used="vision.analyze",
+                    )
+
+            steps[-1]["status"] = "complete"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Screenshot captured ({screenshot.width}x{screenshot.height}). No vision model available to analyze it.",
+                provider="deterministic",
+            )
+        except Exception as e:
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Vision error: {e}",
+                provider="deterministic", error=str(e),
+            )
+
+    async def _handle_memory(
+        self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
+    ) -> PipelineResult:
+        """Handle memory operations."""
+        from pengu.pipeline_handlers import handle_memory
+        return await handle_memory(text, intent, self.tool_registry, steps, PipelineResult)
 
     def _get_offline_chat_response(self, text: str) -> str:
         """Generate a response when no model is available."""

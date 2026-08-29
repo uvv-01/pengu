@@ -590,10 +590,54 @@ class WakeWordDetector:
             return None
         text_lower = text.lower().strip()
         logger.info("wake_check_text", text=text_lower[:100])
+        # Try exact substring match first
         for phrase in [self._config.wake_phrase.lower(), "hello pengu", "hey pengu", "pengu"]:
             if phrase in text_lower:
                 logger.info("wake_phrase_detected", text=text_lower, phrase=phrase)
                 return text_lower
+        # Fuzzy match: check if the transcription is similar enough
+        # STT sometimes produces: "hello pico", "hello miku", "hello pick up", etc.
+        fuzzy_result = self._fuzzy_wake_match(text_lower)
+        if fuzzy_result:
+            logger.info("wake_phrase_fuzzy_match", text=text_lower, matched=fuzzy_result)
+            return text_lower
+        return None
+
+    def _fuzzy_wake_match(self, text: str) -> Optional[str]:
+        """Fuzzy match for wake phrase — handles STT misrecognitions.
+        
+        Common STT errors for 'hello pengu':
+        - 'hello pico', 'hello miku', 'hello pico'
+        - 'hello pick up', 'hello pickyou'
+        - 'yellow pengu', 'ello pengu'
+        - 'hey picku', 'hey piku'
+        """
+        words = text.split()
+        if not words:
+            return None
+        
+        # Core patterns: (greeting, name_pattern)
+        greetings = {"hello", "helo", "yellow", "ello", "hey", "hi", "halo", "hollow"}
+        name_patterns = {"pengu", "pico", "miku", "piku", "picu", "pikup", "picky", "pingu"}
+        
+        greeting_found = False
+        name_found = False
+        
+        for word in words:
+            if word in greetings:
+                greeting_found = True
+            if word in name_patterns:
+                name_found = True
+        
+        # Accept if both greeting and name variant found
+        if greeting_found and name_found:
+            return text
+        
+        # Accept if just 'pengu' or very close variant appears
+        for word in words:
+            if word in name_patterns:
+                return text
+        
         return None
 
     def reset(self) -> None:

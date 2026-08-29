@@ -26,6 +26,7 @@ from typing import Optional
 import httpx
 
 from pengu.config import get_config
+from pengu.context import get_context
 from pengu.logging import get_logger, setup_logging
 from pengu.os.app_launcher import get_launcher
 from pengu.tools.deterministic import register_deterministic_tools
@@ -33,6 +34,7 @@ from pengu.tools.registry import ToolRegistry
 from pengu.voice.engine import VoiceConfig, VoiceEngine, VoiceState
 from pengu.ui.overlay import PenguOverlay, OverlayState
 from pengu.ui.tray import PenguTray, TrayState
+from pengu.hotkey import get_hotkey
 
 logger = get_logger("pengu.app")
 
@@ -93,12 +95,15 @@ class CommandParser:
         if "open pengu" in text_lower or "open pengo" in text_lower:
             if any(w in text_lower for w in ["vs code", "visual studio code", "in code"]):
                 result = self._launcher.open_in_vscode(str(self._pengu_root))
+                get_context().update_app("vscode")
                 return {"action": "open_in_vscode", "speak": result["message"]}
             elif any(w in text_lower for w in ["in explorer", "folder", "in file"]):
                 result = self._launcher.open_folder(str(self._pengu_root))
+                get_context().update_directory(str(self._pengu_root))
                 return {"action": "open_folder", "speak": result["message"]}
             else:
                 result = self._launcher.open_folder(str(self._pengu_root))
+                get_context().update_directory(str(self._pengu_root))
                 return {"action": "open_folder", "speak": result["message"]}
 
         # ---- OPEN [APP] IN VS CODE ----
@@ -125,6 +130,7 @@ class CommandParser:
             if query:
                 url = f"https://chatgpt.com/?q={query.replace(' ', '+')}"
                 result = self._launcher.open_url(url)
+                get_context().update_url(url, f"ChatGPT: {query}")
                 return {"action": "open_chatgpt_search", "speak": f"Searching ChatGPT for {query}."}
 
         # ---- OPEN CHATGPT ----
@@ -134,6 +140,7 @@ class CommandParser:
                 pass
             else:
                 result = self._launcher.open_url("https://chatgpt.com")
+                get_context().update_url("https://chatgpt.com", "ChatGPT")
                 return {"action": "open_chatgpt", "speak": "Opening ChatGPT."}
 
         # ---- SEARCH GOOGLE ----
@@ -145,41 +152,66 @@ class CommandParser:
             query = m.group(1).strip().rstrip(".")
             if query:
                 result = self._launcher.google_search(query)
+                get_context().update_url(f"https://www.google.com/search?q={query.replace(' ', '+')}", f"Google: {query}")
                 return {"action": "google_search", "speak": f"Searching Google for {query}."}
 
         # ---- OPEN CHROME ----
         if "open chrome" in text_lower or "launch chrome" in text_lower or "start chrome" in text_lower:
             result = self._launcher.open_application("chrome")
+            get_context().update_app("chrome")
             return {"action": "open_app", "speak": result["message"]}
 
         # ---- OPEN EDGE ----
         if "open edge" in text_lower or "launch edge" in text_lower:
             result = self._launcher.open_application("edge")
+            get_context().update_app("edge")
             return {"action": "open_app", "speak": result["message"]}
+
+        # ---- OPEN KNOWN FOLDERS (Downloads, Documents, etc.) ----
+        m = re.match(
+            r'^(?:open|go\s+to|show|navigate\s+to)\s+(.+?)(?:\s+folder)?\s*\.?$',
+            text_lower,
+        )
+        if m:
+            folder_name = m.group(1).strip()
+            resolved = self._resolve_shell_folder(folder_name)
+            if resolved:
+                result = self._launcher.open_folder(str(resolved))
+                ctx = get_context()
+                ctx.update_directory(str(resolved))
+                ctx.record_action(f"open_folder:{folder_name}", str(resolved))
+                return {"action": "open_folder", "speak": result["message"]}
 
         # ---- OPEN EXPLORER / FILE EXPLORER ----
         if any(w in text_lower for w in ["open explorer", "open file explorer", "open files", "open my computer", "open file manager"]):
             result = self._launcher.open_application("explorer")
+            ctx = get_context()
+            ctx.update_app("File Explorer")
             return {"action": "open_app", "speak": result["message"]}
 
         # ---- OPEN TERMINAL / COMMAND PROMPT ----
         if any(w in text_lower for w in ["open terminal", "open command prompt", "open cmd", "open powershell"]):
             if "powershell" in text_lower:
                 result = self._launcher.open_application("powershell")
+                get_context().update_app("powershell")
             elif "cmd" in text_lower or "command prompt" in text_lower:
                 result = self._launcher.open_application("cmd")
+                get_context().update_app("cmd")
             else:
                 result = self._launcher.open_application("terminal")
+                get_context().update_app("terminal")
             return {"action": "open_app", "speak": result["message"]}
 
         # ---- OPEN NOTEPAD ----
         if "open notepad" in text_lower or "launch notepad" in text_lower:
             result = self._launcher.open_application("notepad")
+            get_context().update_app("notepad")
             return {"action": "open_app", "speak": result["message"]}
 
         # ---- OPEN VS CODE ----
         if any(w in text_lower for w in ["open vs code", "open visual studio code", "launch vs code", "launch visual studio code", "open code"]):
             result = self._launcher.open_application("vscode")
+            get_context().update_app("vscode")
             return {"action": "open_app", "speak": result["message"]}
 
         # ---- OPEN TASK MANAGER ----
@@ -202,6 +234,7 @@ class CommandParser:
         for name, url in known_urls.items():
             if f"open {name}" in text_lower or f"launch {name}" in text_lower:
                 result = self._launcher.open_url(url)
+                get_context().update_url(url, name)
                 return {"action": "open_url", "speak": f"Opening {name}."}
 
         # ---- GENERIC OPEN [ANYTHING] ----
@@ -218,22 +251,33 @@ class CommandParser:
                 folder = self._resolve_project(target)
                 if folder:
                     result = self._launcher.open_in_vscode(str(folder))
+                    get_context().update_app("vscode")
                     return {"action": "open_in_vscode", "speak": result["message"]}
+
+            # Check if it's a known folder first (including shell folders)
+            resolved_folder = self._resolve_shell_folder(target)
+            if resolved_folder:
+                result = self._launcher.open_folder(str(resolved_folder))
+                get_context().update_directory(str(resolved_folder))
+                return {"action": "open_folder", "speak": result["message"]}
 
             # Check if it's a known project/folder
             folder = self._resolve_project(target)
             if folder and folder.exists():
                 if folder.is_dir():
                     result = self._launcher.open_folder(str(folder))
+                    get_context().update_directory(str(folder))
                     return {"action": "open_folder", "speak": result["message"]}
                 else:
                     result = self._launcher.open_file(str(folder))
+                    get_context().update_file(str(folder))
                     return {"action": "open_file", "speak": result["message"]}
 
             # Try as application
             app = self._launcher.find_app(target)
             if app:
                 result = self._launcher.open_application(target)
+                get_context().update_app(target)
                 return {"action": "open_app", "speak": result["message"]}
 
             return {"action": "error", "speak": f"I couldn't find {target} on your system."}
@@ -302,6 +346,63 @@ class CommandParser:
             return {"action": "volume", "speak": "Volume control is not yet implemented."}
 
         # None = send to LLM
+        return None
+
+    # Windows shell folder names to real paths
+    _SHELL_FOLDERS: dict[str, str] = {
+        "downloads": "Downloads",
+        "documents": "Documents",
+        "desktop": "Desktop",
+        "pictures": "Pictures",
+        "music": "Music",
+        "videos": "Videos",
+        "pengu": "pengu",
+        "projects": "projects",
+    }
+
+    def _resolve_shell_folder(self, name: str) -> Optional[Path]:
+        """Resolve a folder name like 'Downloads' to the real path."""
+        name_lower = name.lower().strip().rstrip(".")
+
+        # Check shell folder names
+        shell_name = self._SHELL_FOLDERS.get(name_lower)
+        if shell_name:
+            if name_lower in ("pengu", "projects"):
+                # Relative to home or pengu root
+                home_dir = Path.home()
+                candidates = [
+                    home_dir / shell_name,
+                    home_dir / "projects" / shell_name,
+                ]
+                # Also check FoveaEdge_old path
+                if (home_dir / "projects" / "FoveaEdge_old" / shell_name).exists():
+                    candidates.append(home_dir / "projects" / "FoveaEdge_old" / shell_name)
+            else:
+                # Standard Windows shell folder
+                candidates = [Path.home() / shell_name]
+
+            for c in candidates:
+                if c.exists() and c.is_dir():
+                    return c
+
+        # Try direct path
+        direct = Path(name)
+        if direct.exists() and direct.is_dir():
+            return direct
+
+        # Try relative to home
+        home_dir = Path.home()
+        home_sub = home_dir / name_lower
+        if home_sub.exists() and home_sub.is_dir():
+            return home_sub
+
+        # Try projects directory
+        projects_dir = home_dir / "projects"
+        if projects_dir.exists():
+            for d in projects_dir.iterdir():
+                if d.is_dir() and name_lower in d.name.lower():
+                    return d
+
         return None
 
     def _resolve_project(self, name: str) -> Optional[Path]:
@@ -460,6 +561,7 @@ class PenguApp:
         self._parser = CommandParser(_get_pengu_root())
         self._model_discovery = ModelDiscovery()
         self._provider = None  # LMStudioProvider set after discovery
+        self._pipeline = None  # CommandPipeline built after discovery
         self._running = False
 
     async def start(self) -> None:
@@ -504,6 +606,14 @@ class PenguApp:
         if status.get("stt") or status.get("tts"):
             await self._voice.start()
 
+        # Register global hotkey (Ctrl+Alt+P)
+        hotkey = get_hotkey()
+        if hotkey.register_default(callback=self._on_hotkey_pressed):
+            hotkey.start()
+            logger.info("hotkey_registered", combo="Ctrl+Alt+P")
+        else:
+            logger.warning("hotkey_registration_failed")
+
         logger.info("pengu_ready", model=self._model_discovery.active_model)
 
         try:
@@ -517,6 +627,9 @@ class PenguApp:
     async def stop(self) -> None:
         """Stop the Pengu application."""
         self._running = False
+        # Stop hotkey listener
+        hotkey = get_hotkey()
+        hotkey.stop()
         if self._voice:
             await self._voice.stop()
         if self._overlay:
@@ -528,18 +641,59 @@ class PenguApp:
 
     def _process_command(self, text: str) -> Optional[str]:
         """Process a voice command. Returns spoken response."""
+        ctx = get_context()
         logger.info("processing_command", text=text)
 
-        # Try deterministic parser first
+        # Try deterministic parser first (fast, covers known apps/folders/git)
         result = self._parser.parse(text)
         if result:
+            ctx.add_turn(text, result.get("speak", "Done."), action_taken=result.get("action", ""))
             return result.get("speak", "Done.")
 
-        # Fall through to LLM
-        return self._chat_with_llm(text)
+        # Fall through to the full command pipeline
+        # (handles web search, browser, vision, memory, multi-step agent, coding)
+        return self._process_with_pipeline(text)
+
+    def _process_with_pipeline(self, text: str) -> str:
+        """Process a command through the full CommandPipeline."""
+        from pengu.pipeline import CommandPipeline
+
+        # Build a lightweight pipeline if not already built
+        if not hasattr(self, '_pipeline') or self._pipeline is None:
+            self._pipeline = CommandPipeline(self._tool_registry, self._provider)
+
+        # Run the pipeline in a thread to avoid event-loop conflicts
+        import concurrent.futures
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    def _run_pipeline():
+                        new_loop = asyncio.new_event_loop()
+                        try:
+                            return new_loop.run_until_complete(
+                                self._pipeline.process(text)
+                            )
+                        finally:
+                            new_loop.close()
+                    future = pool.submit(_run_pipeline)
+                    pipeline_result = future.result(timeout=30)
+            else:
+                pipeline_result = loop.run_until_complete(
+                    self._pipeline.process(text)
+                )
+
+            ctx = get_context()
+            ctx.add_turn(text, pipeline_result.response, action_taken=pipeline_result.tool_used)
+            return pipeline_result.response
+
+        except Exception as e:
+            logger.error("pipeline_error", error=str(e))
+            return self._chat_with_llm(text)
 
     def _chat_with_llm(self, text: str) -> str:
         """Chat with the local LLM for general questions."""
+        ctx = get_context()
         if not self._provider or not self._provider.is_available():
             return (
                 "I can execute desktop commands, but no local language model "
@@ -550,20 +704,33 @@ class PenguApp:
         from pengu.models.base import ChatMessage
         loop = asyncio.new_event_loop()
         try:
+            # Include context in the system prompt for multi-turn awareness
+            context_summary = ctx.get_summary()
+            context_info = ""
+            if context_summary.get("current_app"):
+                context_info += f"Current app: {context_summary['current_app']}. "
+            if context_summary.get("current_url"):
+                context_info += f"Current URL: {context_summary['current_url']}. "
+            if context_summary.get("current_directory"):
+                context_info += f"Current directory: {context_summary['current_directory']}. "
+
+            system_msg = (
+                "You are Pengu, a local-first desktop assistant running on Windows. "
+                "Be concise and helpful. Respond in 1-2 sentences."
+            )
+            if context_info:
+                system_msg += f"\nSession context: {context_info}"
+
             messages = [
-                ChatMessage(
-                    role="system",
-                    content=(
-                        "You are Pengu, a local-first desktop assistant running on Windows. "
-                        "Be concise and helpful. Respond in 1-2 sentences."
-                    ),
-                ),
+                ChatMessage(role="system", content=system_msg),
                 ChatMessage(role="user", content=text),
             ]
             response = loop.run_until_complete(
                 self._provider.chat(messages, temperature=0.7, max_tokens=256)
             )
-            return response.content if not response.error else f"Model error: {response.error}"
+            resp_text = response.content if not response.error else f"Model error: {response.error}"
+            ctx.add_turn(text, resp_text, action_taken="llm_chat")
+            return resp_text
         except Exception as e:
             return f"Model error: {e}"
         finally:
@@ -610,6 +777,17 @@ class PenguApp:
         if self._voice:
             loop = asyncio.new_event_loop()
             loop.run_until_complete(self._voice.start())
+
+    def _on_hotkey_pressed(self) -> None:
+        """Handle global hotkey press — toggle voice activation."""
+        if self._voice:
+            if self._voice.is_running:
+                # If currently in STANDBY, simulate wake
+                from pengu.voice.engine import VoiceState
+                if self._voice.state == VoiceState.STANDBY:
+                    # Trigger wake manually
+                    self._voice._wake_detector._last_wake_time = 0
+                    logger.info("hotkey_wake_triggered")
 
     def _on_tray_exit(self) -> None:
         self._running = False
