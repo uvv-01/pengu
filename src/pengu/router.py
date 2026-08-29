@@ -156,6 +156,28 @@ TERMINAL_RULES: list[Rule] = [
 ]
 
 # Application control patterns
+# Desktop interaction rules (click, type, scroll, go-to)
+DESKTOP_INTERACTION_RULES: list[Rule] = [
+    Rule(
+        category=TaskCategory.SYSTEM_CONTROL,
+        patterns=_compile([
+            r"\bclick\s+(.+)",
+            r"\bpress\s+(.+)",
+            r"\bscroll\s+(down|up|left|right)",
+            r"\btype\s+(.+)",
+            r"\benter\s+(.+)",
+            r"\bgo\s+to\s+(.+)",
+            r"\bnavigate\s+to\s+(.+)",
+            r"\bclick\s+the\s+(.+)",
+            r"\bclick\s+first\s+result",
+            r"\bclick\s+first\s+(link|button|result)",
+        ]),
+        action="desktop_interaction",
+        confidence=0.85,
+        description="Desktop UI interaction: click, type, scroll",
+    ),
+]
+
 APPLICATION_RULES: list[Rule] = [
     Rule(
         category=TaskCategory.SYSTEM_CONTROL,
@@ -309,6 +331,7 @@ ALL_RULES: list[Rule] = (
     + GIT_RULES
     + TERMINAL_RULES
     + CODING_RULES
+    + DESKTOP_INTERACTION_RULES
     + APPLICATION_RULES
     + FILE_RULES
     + WEB_RULES

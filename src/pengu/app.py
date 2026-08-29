@@ -644,15 +644,54 @@ class PenguApp:
         ctx = get_context()
         logger.info("processing_command", text=text)
 
+        # Resolve follow-up commands using context
+        resolved = ctx.resolve_followup(text)
+        if resolved != text:
+            logger.info("context_resolved", original=text, resolved=resolved)
+            text = resolved
+
         # Try deterministic parser first (fast, covers known apps/folders/git)
         result = self._parser.parse(text)
         if result:
             ctx.add_turn(text, result.get("speak", "Done."), action_taken=result.get("action", ""))
             return result.get("speak", "Done.")
 
+        # Check for multi-step tasks ("open Chrome and search for X")
+        import re
+        if re.search(r'\b(?:and|then|;|also)\s+', text, re.IGNORECASE):
+            return self._process_multi_step(text)
+
         # Fall through to the full command pipeline
-        # (handles web search, browser, vision, memory, multi-step agent, coding)
         return self._process_with_pipeline(text)
+
+    def _process_multi_step(self, text: str) -> str:
+        """Process a multi-step command using the TaskPlanner."""
+        import concurrent.futures
+        try:
+            from pengu.agent.planner import get_planner, get_executor
+            planner = get_planner()
+            executor = get_executor()
+            plan = planner.create_plan(text)
+            logger.info("multi_step_plan", steps=len(plan.steps), goal=plan.goal[:80])
+
+            # Execute the plan in a thread to avoid event-loop conflicts
+            def _run_plan():
+                new_loop = asyncio.new_event_loop()
+                try:
+                    return new_loop.run_until_complete(executor.execute_plan(plan))
+                finally:
+                    new_loop.close()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_run_plan)
+                response = future.result(timeout=60)
+
+            ctx = get_context()
+            ctx.add_turn(text, response, action_taken="multi_step")
+            return response
+        except Exception as e:
+            logger.error("multi_step_error", error=str(e))
+            return self._process_with_pipeline(text)
 
     def _process_with_pipeline(self, text: str) -> str:
         """Process a command through the full CommandPipeline."""

@@ -611,14 +611,24 @@ class WakeWordDetector:
         - 'hello pick up', 'hello pickyou'
         - 'yellow pengu', 'ello pengu'
         - 'hey picku', 'hey piku'
+        - 'hello picker', 'hello pick her'
+        - 'oh hello pengu' (extra words)
         """
         words = text.split()
         if not words:
             return None
         
         # Core patterns: (greeting, name_pattern)
-        greetings = {"hello", "helo", "yellow", "ello", "hey", "hi", "halo", "hollow"}
-        name_patterns = {"pengu", "pico", "miku", "piku", "picu", "pikup", "picky", "pingu"}
+        greetings = {
+            "hello", "helo", "yellow", "ello", "hey", "hi", "halo",
+            "hollow", "oh", "ah", "eh", "yo", "sup", "hiya",
+            "howdy", "hey", "hola",
+        }
+        name_patterns = {
+            "pengu", "pico", "miku", "piku", "picu", "pikup",
+            "picky", "pingu", "picker", "pico", "pengu", "pinger",
+            "pica", "pinky", "pigeon", "pique",
+        }
         
         greeting_found = False
         name_found = False
@@ -626,7 +636,10 @@ class WakeWordDetector:
         for word in words:
             if word in greetings:
                 greeting_found = True
+            # Check for name pattern with edit distance
             if word in name_patterns:
+                name_found = True
+            elif self._edit_distance(word, "pengu") <= 2:
                 name_found = True
         
         # Accept if both greeting and name variant found
@@ -635,10 +648,34 @@ class WakeWordDetector:
         
         # Accept if just 'pengu' or very close variant appears
         for word in words:
-            if word in name_patterns:
+            if word in name_patterns or self._edit_distance(word, "pengu") <= 2:
+                return text
+        
+        # Check for "pick up" as two words combining to "pengu"
+        for i in range(len(words) - 1):
+            combined = words[i] + words[i + 1]
+            if self._edit_distance(combined, "pengu") <= 3:
                 return text
         
         return None
+
+    @staticmethod
+    def _edit_distance(s1: str, s2: str) -> int:
+        """Simple Levenshtein edit distance."""
+        if len(s1) < len(s2):
+            return VoiceEngine._edit_distance(s2, s1)
+        if len(s2) == 0:
+            return len(s1)
+        prev_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            curr_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = prev_row[j + 1] + 1
+                deletions = curr_row[j] + 1
+                substitutions = prev_row[j] + (c1 != c2)
+                curr_row.append(min(insertions, deletions, substitutions))
+            prev_row = curr_row
+        return prev_row[-1]
 
     def reset(self) -> None:
         self._speech_active = False
@@ -1091,20 +1128,28 @@ class VoiceEngine:
         logger.info("command_transcribed", text=text)
         self._set_state(VoiceState.THINKING)
         result_text = None
-        if self._command_callback:
-            try:
+        try:
+            if self._command_callback:
                 self._set_state(VoiceState.EXECUTING)
                 result_text = self._command_callback(text)
                 self._diagnostics["commands_processed"] += 1
-            except Exception as e:
-                logger.error("command_error", error=str(e))
-                result_text = f"Error executing command: {e}"
-        if result_text:
+        except Exception as e:
+            logger.error("command_error", error=str(e))
+            # NEVER crash — always recover with a useful message
+            result_text = f"Sorry, something went wrong: {e}. Please try again."
+            self._diagnostics["errors"] += 1
+        # Always speak a response (success or failure)
+        if not result_text:
+            result_text = "Done."
+        try:
             self._set_state(VoiceState.SPEAKING)
             self._microphone.mute()
             self._safe_tts_speak(result_text)
             self._diagnostics["tts_spoken"] += 1
             time.sleep(0.3)
+            self._microphone.unmute()
+        except Exception as e:
+            logger.error("tts_response_error", error=str(e))
             self._microphone.unmute()
 
     def _safe_tts_speak(self, text: str) -> None:

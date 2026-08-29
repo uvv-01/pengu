@@ -312,6 +312,10 @@ class CommandPipeline:
                 provider="deterministic", error=tool_result.error,
             )
 
+        # --- Desktop interaction (click, type, scroll) ---
+        if action == "desktop_interaction":
+            return await self._handle_desktop_interaction(text, intent, task_id, steps)
+
         # --- VS Code with project/folder ---
         if intent.extracted_action == "vscode" or "vs code" in text.lower() or "vscode" in text.lower():
             # Check if there's a folder/project to open
@@ -688,6 +692,116 @@ class CommandPipeline:
             provider="deterministic",
         )
 
+    async def _handle_desktop_interaction(
+        self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
+    ) -> PipelineResult:
+        """Handle desktop interaction: click, type, scroll, etc."""
+        steps.append({"step": "desktop_interaction", "status": "running"})
+        action = intent.extracted_action
+        target = intent.extracted_target
+        text_lower = text.lower().strip()
+
+        try:
+            from pengu.agent.desktop import get_desktop
+            desktop = get_desktop()
+
+            # Click
+            if "click" in action or text_lower.startswith("click"):
+                import re
+                click_match = re.search(r"click\s+(?:the\s+)?(.+)", text_lower)
+                target_text = click_match.group(1).strip().rstrip(".") if click_match else target
+
+                # Try browser click first
+                from pengu.agent.browser_agent import get_browser_agent
+                browser = get_browser_agent()
+                if browser._page:
+                    result = await browser.find_and_click(target_text)
+                    steps[-1]["status"] = "complete" if result.success else "error"
+                    return PipelineResult(
+                        text=text, intent=intent,
+                        response=result.message,
+                        provider="deterministic", tool_used="browser.click",
+                    )
+
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response=f"I'll try to click '{target_text}', but I need a browser or UI element to interact with.",
+                    provider="deterministic",
+                )
+
+            # Type text
+            if "type" in action or text_lower.startswith("type"):
+                type_match = re.search(r"type\s+(.+)", text_lower)
+                type_text = type_match.group(1).strip().rstrip(".") if type_match else target
+
+                # Try browser type first
+                from pengu.agent.browser_agent import get_browser_agent
+                browser = get_browser_agent()
+                if browser._page:
+                    result = await browser.type_in_page(type_text)
+                    steps[-1]["status"] = "complete" if result.success else "error"
+                    return PipelineResult(
+                        text=text, intent=intent,
+                        response=result.message,
+                        provider="deterministic", tool_used="browser.type",
+                    )
+
+                # Desktop type
+                desktop.keyboard.type_text(type_text)
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response=f"Typed '{type_text}'",
+                    provider="deterministic", tool_used="desktop.type",
+                )
+
+            # Scroll
+            if "scroll" in text_lower:
+                direction = "down" if "down" in text_lower else "up"
+                desktop.mouse.scroll(
+                    desktop.window.get_screen_size()[0] // 2,
+                    desktop.window.get_screen_size()[1] // 2,
+                    delta=-3 if direction == "down" else 3,
+                )
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response=f"Scrolled {direction}",
+                    provider="deterministic", tool_used="desktop.scroll",
+                )
+
+            # Go to (navigate in browser)
+            if "go to" in text_lower or "navigate" in text_lower:
+                go_match = re.search(r"(?:go\s+to|navigate\s+to)\s+(.+)", text_lower)
+                if go_match:
+                    go_target = go_match.group(1).strip().rstrip(".")
+                    # Try as URL first
+                    from pengu.agent.browser_agent import get_browser_agent
+                    browser = get_browser_agent()
+                    result = await browser.navigate(go_target)
+                    steps[-1]["status"] = "complete" if result.success else "error"
+                    return PipelineResult(
+                        text=text, intent=intent,
+                        response=result.message,
+                        provider="deterministic", tool_used="browser.navigate",
+                    )
+
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"I'm not sure how to do that. Try 'click the button' or 'type text'.",
+                provider="deterministic",
+            )
+
+        except Exception as e:
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Desktop interaction error: {e}",
+                provider="deterministic", error=str(e),
+            )
+
     async def _handle_network(
         self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
     ) -> PipelineResult:
@@ -899,15 +1013,69 @@ class CommandPipeline:
     async def _handle_browser(
         self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
     ) -> PipelineResult:
-        """Handle browser operations."""
+        """Handle browser operations — uses real BrowserAgent for interaction."""
         steps.append({"step": "browser", "status": "running"})
 
         import re
+        from pengu.agent.browser_agent import get_browser_agent
+        agent = get_browser_agent()
+        text_lower = text.lower().strip()
+
+        # Search on ChatGPT
+        chatgpt_match = re.search(
+            r"(?:search|ask)\s+chatgpt\s+(?:for\s+|about\s+)?(.+)", text_lower
+        )
+        if chatgpt_match:
+            query = chatgpt_match.group(1).strip().rstrip(".")
+            result = await agent.search_chatgpt(query)
+            steps[-1]["status"] = "complete" if result.success else "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=result.message,
+                provider="deterministic", tool_used="browser.chatgpt",
+            )
+
+        # Search on Google
+        google_match = re.search(
+            r"(?:search|google|look\s+up|find)\s+(?:google\s+)?(?:for\s+)?(.+)", text_lower
+        )
+        if google_match:
+            query = google_match.group(1).strip().rstrip(".")
+            result = await agent.search_google(query)
+            steps[-1]["status"] = "complete" if result.success else "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=result.message,
+                provider="deterministic", tool_used="browser.search",
+            )
+
+        # Click element on page
+        click_match = re.search(r"click\s+(?:the\s+)?(.+)", text_lower)
+        if click_match:
+            target = click_match.group(1).strip().rstrip(".")
+            result = await agent.find_and_click(target)
+            steps[-1]["status"] = "complete" if result.success else "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=result.message,
+                provider="deterministic", tool_used="browser.click",
+            )
+
+        # Read page
+        if any(w in text_lower for w in ["read", "what's on", "what is on", "describe"]):
+            result = await agent.read_page()
+            steps[-1]["status"] = "complete" if result.success else "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=result.message,
+                provider="deterministic", tool_used="browser.read",
+            )
+
+        # Navigate to URL
         url_match = re.search(r"(https?://\S+)", text)
         if url_match:
             url = url_match.group(1)
         else:
-            # Try to find a URL-like target
             target = intent.extracted_target
             if target and not target.startswith("http"):
                 url = f"https://{target}"
@@ -915,27 +1083,17 @@ class CommandPipeline:
                 steps[-1]["status"] = "error"
                 return PipelineResult(
                     text=text, intent=intent,
-                    response="What URL would you like me to open?",
+                    response="What would you like me to do in the browser?",
                     provider="deterministic",
                 )
 
-        try:
-            from pengu.web.browser import get_browser
-            browser = get_browser()
-            page = await browser.open(url)
-            steps[-1]["status"] = "complete"
-            return PipelineResult(
-                text=text, intent=intent,
-                response=f"Opened {page.title} ({url})",
-                provider="deterministic", tool_used="browser.open",
-            )
-        except Exception as e:
-            steps[-1]["status"] = "error"
-            return PipelineResult(
-                text=text, intent=intent,
-                response=f"Browser error: {e}",
-                provider="deterministic", error=str(e),
-            )
+        result = await agent.navigate(url)
+        steps[-1]["status"] = "complete" if result.success else "error"
+        return PipelineResult(
+            text=text, intent=intent,
+            response=result.message,
+            provider="deterministic", tool_used="browser.navigate",
+        )
 
     async def _handle_vision(
         self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
