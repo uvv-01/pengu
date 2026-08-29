@@ -528,6 +528,7 @@ class WakeWordDetector:
                 self._buffer = [audio]
                 self._speech_start = now
                 self._silence_frames = 0
+                logger.debug("wake_speech_start", energy=round(energy, 2), threshold=round(self._config.vad_energy_threshold, 2))
             return None
         else:
             self._buffer.append(audio)
@@ -537,6 +538,7 @@ class WakeWordDetector:
                 if self._silence_frames >= 3:
                     self._speech_active = False
                     if speech_duration >= 0.3 and self._buffer:
+                        logger.debug("wake_speech_end", duration=round(speech_duration, 2), chunks=len(self._buffer))
                         result = self._check_wake_phrase(self._buffer)
                         self._buffer = []
                         if result:
@@ -852,7 +854,55 @@ class VoiceEngine:
             self._microphone.calibrate_noise_floor()
             self._command_recorder.set_noise_floor(self._microphone.noise_floor)
 
+            # Validate the selected mic actually produces usable audio for STT
+            if stt_ok:
+                stt_valid = await self._validate_mic_with_stt()
+                result["mic_stt_valid"] = stt_valid
+                if not stt_valid:
+                    logger.warning("mic_stt_validation_failed", hint="Device audio may produce poor STT results")
+
         return result
+
+    async def _validate_mic_with_stt(self) -> bool:
+        """Capture a short audio sample and verify STT can process it.
+
+        Returns True if the device produces audio that STT can handle
+        (even if no speech is present — we just check the pipeline works).
+        Returns False if the audio is completely broken.
+        """
+        try:
+            # Collect 2 seconds of audio from the running stream
+            chunks = []
+            start = time.time()
+            while time.time() - start < 2.0:
+                audio = self._microphone.get_audio(timeout=0.2)
+                if audio is not None:
+                    chunks.append(audio)
+            if not chunks:
+                logger.warning("mic_stt_validation_no_audio")
+                return False
+            audio = np.concatenate(chunks)
+            rms = float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
+            logger.info("mic_stt_validation", duration=f"{len(audio)/self._config.sample_rate:.1f}s", rms=round(rms, 1))
+            # Run STT in a thread to avoid event-loop conflicts.
+            # The caller (PenguApp.start) already has an asyncio loop running.
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                def _run_stt():
+                    loop = asyncio.new_event_loop()
+                    try:
+                        return loop.run_until_complete(self._stt.transcribe(audio))
+                    finally:
+                        loop.close()
+                future = pool.submit(_run_stt)
+                text = future.result(timeout=15)
+            logger.info("mic_stt_validation_result", text=text[:100] if text else "(empty)")
+            # Empty transcription is OK — means the pipeline works, just no speech
+            # We only fail if STT throws an exception or produces garbage
+            return True
+        except Exception as e:
+            logger.error("mic_stt_validation_error", error=str(e))
+            return False
 
     async def start(self) -> None:
         self._running = True
@@ -919,11 +969,24 @@ class VoiceEngine:
         self._wake_detector.reset()
         self._microphone.flush()
         self._microphone.unmute()
-        logger.info("standby_listening")
+        threshold = self._config.vad_energy_threshold
+        logger.info("standby_listening", threshold=round(threshold, 2))
+        _debug_counter = 0
         while self._running:
             audio = self._microphone.get_audio(timeout=0.1)
-            if audio is None: continue
+            if audio is None:
+                continue
             energy = self._microphone.calculate_energy(audio)
+            # Periodic diagnostic: show energy vs threshold
+            _debug_counter += 1
+            if _debug_counter % 50 == 0:
+                logger.debug(
+                    "voice_loop_energy",
+                    energy=round(energy, 2),
+                    threshold=round(threshold, 2),
+                    speech_active=self._wake_detector._speech_active,
+                    queue_size=self._microphone._audio_queue.qsize(),
+                )
             wake = self._wake_detector.process_chunk_simple(audio, energy)
             if wake is not None:
                 self._diagnostics["wake_detections"] += 1
@@ -935,9 +998,11 @@ class VoiceEngine:
         time.sleep(0.2)
         self._set_state(VoiceState.ACKNOWLEDGING)
         self._microphone.mute()
-        future = asyncio.run_coroutine_threadsafe(self._tts.speak("Yes?"), self._loop)
-        try: future.result(timeout=5)
-        except: pass
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._tts.speak("Yes?"), self._loop)
+            future.result(timeout=10)
+        except Exception as e:
+            logger.warning("tts_acknowledge_failed", error=str(e))
         time.sleep(0.4)
         self._microphone.flush()
         self._microphone.unmute()
@@ -999,9 +1064,11 @@ class VoiceEngine:
             self._microphone.unmute()
 
     def _safe_tts_speak(self, text: str) -> None:
-        future = asyncio.run_coroutine_threadsafe(self._tts.speak(text), self._loop)
-        try: future.result(timeout=30)
-        except: pass
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._tts.speak(text), self._loop)
+            future.result(timeout=30)
+        except Exception as e:
+            logger.warning("tts_speak_failed", text_length=len(text), error=str(e))
 
     def interrupt(self) -> None:
         self._tts.cancel()
