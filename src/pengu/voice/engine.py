@@ -821,13 +821,14 @@ class VoiceEngine:
         self._microphone = MicrophoneManager(self._config)
         self._stt = STTEngine(self._config)
         self._tts = TTSEngine(self._config)
-        # Event loop is set in start() — pass None initially, set later
+        # Event loop is set in start() ï¿½ pass None initially, set later
         self._wake_detector = WakeWordDetector(self._config, self._stt, event_loop=None)
         self._command_recorder = CommandRecorder(self._config)
         self._state = VoiceState.OFFLINE
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
         self._pending_command_audio: Optional[np.ndarray] = None
         self._mic_quality_ok = False
         self._diagnostics: dict[str, Any] = {
@@ -857,6 +858,11 @@ class VoiceEngine:
         self._running = True
         self._loop = asyncio.new_event_loop()
         self._wake_detector._event_loop = self._loop
+        # Run the event loop in a dedicated thread so run_coroutine_threadsafe works.
+        self._loop_thread = threading.Thread(
+            target=self._run_event_loop, daemon=True, name="voice-event-loop",
+        )
+        self._loop_thread.start()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="voice-engine")
         self._thread.start()
         self._set_state(VoiceState.STANDBY)
@@ -867,10 +873,25 @@ class VoiceEngine:
         self._set_state(VoiceState.STOPPING)
         self._tts.cancel()
         self._microphone.stop()
+        # Stop the event loop thread
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop_thread and self._loop_thread.is_alive():
+            self._loop_thread.join(timeout=5)
+        if self._loop and not self._loop.is_closed():
+            self._loop.close()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
         self._set_state(VoiceState.OFFLINE)
         logger.info("voice_engine_stopped")
+
+    def _run_event_loop(self) -> None:
+        """Target for the event-loop thread: runs the loop until stopped."""
+        try:
+            self._loop.run_forever()
+        finally:
+            if not self._loop.is_closed():
+                self._loop.close()
 
     def _run_loop(self) -> None:
         consecutive_errors = 0

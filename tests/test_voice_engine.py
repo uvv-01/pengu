@@ -365,7 +365,7 @@ class TestWakeWordDetector:
         stt.transcribe = AsyncMock(return_value="hello pengu")
         detector = WakeWordDetector(config, stt)
 
-        # Very short utterance (<0.3s) — should be skipped
+        # Very short utterance (<0.3s) ï¿½ should be skipped
         short_buffer = [np.ones(256, dtype=np.int16) * 1000]  # ~0.016s at 16kHz
         result = detector._check_wake_phrase(short_buffer)
         assert result is None
@@ -887,3 +887,169 @@ class TestAudioDeviceManager:
         from pengu.voice.mic_diagnostics import MIN_SNR_DB as D_SNR, MIN_SPEECH_RMS as D_RMS
         assert MIN_SNR_DB == E_SNR == D_SNR == 6.0
         assert MIN_SPEECH_RMS == E_RMS == D_RMS == 100.0
+
+
+# =========================================================================
+# Regression: event-loop thread must actually run
+# =========================================================================
+
+
+class TestVoiceEngineEventLoop:
+    """Verify the event-loop thread is started and coroutines actually execute."""
+
+    def test_event_loop_thread_starts(self):
+        """start() must launch a background thread that runs the event loop."""
+        config = VoiceConfig()
+        engine = VoiceEngine(config)
+        # Mock microphone to skip real hardware
+        engine._microphone.select_and_start = MagicMock(return_value=False)
+        engine._stt.initialize = AsyncMock(return_value=True)
+        engine._tts.initialize = AsyncMock(return_value=True)
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(engine.start())
+            # The event-loop thread must be alive
+            assert engine._loop_thread is not None
+            assert engine._loop_thread.is_alive()
+            # The loop must be running
+            assert engine._loop is not None
+            assert engine._loop.is_running()
+        finally:
+            loop.run_until_complete(engine.stop())
+            loop.close()
+
+    def test_coroutine_executes_on_loop(self):
+        """A coroutine scheduled via run_coroutine_threadsafe must actually run."""
+        config = VoiceConfig()
+        engine = VoiceEngine(config)
+        engine._microphone.select_and_start = MagicMock(return_value=False)
+        engine._stt.initialize = AsyncMock(return_value=True)
+        engine._tts.initialize = AsyncMock(return_value=True)
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(engine.start())
+            result_holder = []
+
+            async def _test_coro():
+                result_holder.append(42)
+
+            future = asyncio.run_coroutine_threadsafe(_test_coro(), engine._loop)
+            future.result(timeout=5)
+            assert result_holder == [42]
+        finally:
+            loop.run_until_complete(engine.stop())
+            loop.close()
+
+    def test_tts_speak_coroutine_executes(self):
+        """TTS speak() coroutine scheduled on the event loop must complete."""
+        config = VoiceConfig()
+        engine = VoiceEngine(config)
+        engine._microphone.select_and_start = MagicMock(return_value=False)
+        engine._stt.initialize = AsyncMock(return_value=True)
+        engine._tts.initialize = AsyncMock(return_value=True)
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(engine.start())
+            # Mock TTS speak to avoid actual audio output
+            engine._tts.speak = AsyncMock(return_value=True)
+
+            # This is exactly what _phase_acknowledge does
+            future = asyncio.run_coroutine_threadsafe(engine._tts.speak("Yes?"), engine._loop)
+            result = future.result(timeout=5)
+            assert result is True
+            engine._tts.speak.assert_called_once_with("Yes?")
+        finally:
+            loop.run_until_complete(engine.stop())
+            loop.close()
+
+    def test_stop_closes_loop(self):
+        """stop() must cleanly shut down the event loop thread."""
+        config = VoiceConfig()
+        engine = VoiceEngine(config)
+        engine._microphone.select_and_start = MagicMock(return_value=False)
+        engine._stt.initialize = AsyncMock(return_value=True)
+        engine._tts.initialize = AsyncMock(return_value=True)
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(engine.start())
+            assert engine._loop.is_running()
+            loop.run_until_complete(engine.stop())
+            # After stop, the loop thread must be dead
+            if engine._loop_thread:
+                engine._loop_thread.join(timeout=3)
+                assert not engine._loop_thread.is_alive()
+            assert engine.state == VoiceState.OFFLINE
+        finally:
+            loop.close()
+
+    def test_command_callback_receives_text(self):
+        """The command_callback must be invoked with transcribed text."""
+        config = VoiceConfig()
+        received = []
+
+        def _callback(text: str) -> Optional[str]:
+            received.append(text)
+            return f"Echo: {text}"
+
+        engine = VoiceEngine(config, command_callback=_callback)
+        engine._microphone.select_and_start = MagicMock(return_value=False)
+        engine._stt.initialize = AsyncMock(return_value=True)
+        engine._tts.initialize = AsyncMock(return_value=True)
+        # Mock TTS to avoid actual playback
+        engine._tts.speak = AsyncMock(return_value=True)
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(engine.start())
+            # Manually invoke _phase_transcribe_and_execute with pre-set audio
+            engine._pending_command_audio = np.ones(16000, dtype=np.int16) * 1000
+            engine._stt.transcribe = AsyncMock(return_value="open vs code")
+
+            # Run in the voice thread context
+            engine._phase_transcribe_and_execute()
+
+            assert received == ["open vs code"]
+        finally:
+            loop.run_until_complete(engine.stop())
+            loop.close()
+
+    def test_empty_transcription_speaks_error(self):
+        """When STT returns empty, TTS must speak an error message."""
+        config = VoiceConfig()
+        engine = VoiceEngine(config)
+        engine._microphone.select_and_start = MagicMock(return_value=False)
+        engine._stt.initialize = AsyncMock(return_value=True)
+        engine._tts.initialize = AsyncMock(return_value=True)
+        engine._tts.speak = AsyncMock(return_value=True)
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(engine.start())
+            engine._pending_command_audio = np.ones(16000, dtype=np.int16) * 1000
+            engine._stt.transcribe = AsyncMock(return_value=None)
+
+            engine._phase_transcribe_and_execute()
+
+            # TTS should have been called with an error message
+            engine._tts.speak.assert_called()
+            spoken_text = engine._tts.speak.call_args[0][0]
+            assert "didn't catch" in spoken_text.lower() or "try again" in spoken_text.lower()
+        finally:
+            loop.run_until_complete(engine.stop())
+            loop.close()
