@@ -30,7 +30,8 @@ from pengu.context import get_context
 from pengu.logging import get_logger, setup_logging
 from pengu.os.app_launcher import get_launcher
 from pengu.tools.deterministic import register_deterministic_tools
-from pengu.tools.registry import ToolRegistry
+from pengu.tools.registry import ToolRegistry, ToolResult
+from pengu.agent.tools import register_agent_tools
 from pengu.voice.engine import VoiceConfig, VoiceEngine, VoiceState
 from pengu.ui.overlay import PenguOverlay, OverlayState
 from pengu.ui.tray import PenguTray, TrayState
@@ -569,8 +570,10 @@ class PenguApp:
         logger.info("pengu_starting")
         self._running = True
 
-        # Register tools
+        # Register all tools (deterministic + agent)
         register_deterministic_tools(self._tool_registry)
+        register_agent_tools(self._tool_registry)
+        logger.info("all_tools_registered", total=self._tool_registry.to_dict()["total"])
 
         # Discover models
         discovery_result = await self._model_discovery.discover()
@@ -640,7 +643,14 @@ class PenguApp:
             await self._provider.close()
 
     def _process_command(self, text: str) -> Optional[str]:
-        """Process a voice command. Returns spoken response."""
+        """Process a voice command. Returns spoken response.
+
+        Flow:
+          1. Resolve follow-up context
+          2. Try deterministic parser (fast, covers known apps/folders/git)
+          3. For complex goals — route through AgentBrain (observe→plan→act→verify)
+          4. Fallback to CommandPipeline → LLM chat
+        """
         ctx = get_context()
         logger.info("processing_command", text=text)
 
@@ -656,42 +666,106 @@ class PenguApp:
             ctx.add_turn(text, result.get("speak", "Done."), action_taken=result.get("action", ""))
             return result.get("speak", "Done.")
 
-        # Check for multi-step tasks ("open Chrome and search for X")
+        # Check for multi-step or complex goals — route through AgentBrain
         import re
-        if re.search(r'\b(?:and|then|;|also)\s+', text, re.IGNORECASE):
-            return self._process_multi_step(text)
+        if re.search(r'\b(?:and|then|;|also|after that)\s+', text, re.IGNORECASE):
+            return self._process_with_agent(text)
+
+        # Check if the goal needs browser/desktop agent capabilities
+        goal_lower = text.lower().strip()
+        agent_triggers = [
+            "search", "google", "browse", "find out", "research",
+            "what is", "what's", "tell me", "summarize", "check",
+            "read page", "scroll", "click", "first result",
+        ]
+        if any(trigger in goal_lower for trigger in agent_triggers):
+            return self._process_with_agent(text)
 
         # Fall through to the full command pipeline
         return self._process_with_pipeline(text)
 
-    def _process_multi_step(self, text: str) -> str:
-        """Process a multi-step command using the TaskPlanner."""
+    def _process_with_agent(self, text: str) -> str:
+        """Process a complex goal through the AgentBrain.
+
+        Flow:
+          AgentBrain.understand(goal)
+          → AgentBrain.observe()
+          → AgentBrain.plan()
+          → for each step: AgentBrain.act(tool_executor)
+          → verify
+          → recover/replan if needed
+          → final response
+        """
         import concurrent.futures
+        from pengu.agent.brain import get_brain
+        from pengu.agent.mission import get_mission_manager
+
+        brain = get_brain(model_provider=self._provider, tool_registry=self._tool_registry)
+        mission_mgr = get_mission_manager(brain=brain)
+
+        # Create a tool executor that uses the ToolRegistry
+        async def tool_executor(action: str, params: dict) -> Any:
+            """Execute an action through the unified ToolRegistry."""
+            # Map action names to registered tool names
+            tool_name = self._map_action_to_tool(action)
+            if tool_name:
+                result = await self._tool_registry.execute(tool_name, **params)
+                return result
+            return ToolResult(success=False, error=f"Unknown action: {action}")
+
+        mission_mgr.set_tool_executor(tool_executor)
+
+        def _run_mission():
+            new_loop = asyncio.new_event_loop()
+            try:
+                return new_loop.run_until_complete(
+                    mission_mgr.execute_goal(text, tool_executor=tool_executor)
+                )
+            finally:
+                new_loop.close()
+
         try:
-            from pengu.agent.planner import get_planner, get_executor
-            planner = get_planner()
-            executor = get_executor()
-            plan = planner.create_plan(text)
-            logger.info("multi_step_plan", steps=len(plan.steps), goal=plan.goal[:80])
-
-            # Execute the plan in a thread to avoid event-loop conflicts
-            def _run_plan():
-                new_loop = asyncio.new_event_loop()
-                try:
-                    return new_loop.run_until_complete(executor.execute_plan(plan))
-                finally:
-                    new_loop.close()
-
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_run_plan)
-                response = future.result(timeout=60)
+                future = pool.submit(_run_mission)
+                response = future.result(timeout=120)  # 2 min for complex tasks
 
             ctx = get_context()
-            ctx.add_turn(text, response, action_taken="multi_step")
+            ctx.add_turn(text, response, action_taken="agent")
             return response
         except Exception as e:
-            logger.error("multi_step_error", error=str(e))
+            logger.error("agent_error", error=str(e))
             return self._process_with_pipeline(text)
+
+    def _map_action_to_tool(self, action: str) -> Optional[str]:
+        """Map an agent action name to a registered tool name."""
+        action_map = {
+            # Browser
+            "open_app": "application.open",
+            "navigate": "browser.navigate",
+            "web_search": "web_search.search",
+            "click": "browser.click",
+            "type_text": "browser.type",
+            "read_page": "browser.read",
+            "scroll": "browser.scroll",
+            # Desktop
+            "desktop_click": "desktop.click",
+            "desktop_type": "desktop.type",
+            "desktop_press": "desktop.press",
+            "desktop_hotkey": "desktop.hotkey",
+            "desktop_focus": "desktop.focus_window",
+            # Screen
+            "screen_inspect": "screen.inspect",
+            "screen_get_active": "screen.get_active_window",
+            "screen_ui_tree": "screen.get_ui_tree",
+            # Filesystem
+            "open_folder": "filesystem.list_directory",
+            "list_files": "filesystem.list_directory",
+            "create_file": "filesystem.write_file",
+            "create_folder": "filesystem.write_file",
+            # Chat
+            "chat": None,  # Falls through to LLM
+        }
+        return action_map.get(action)
 
     def _process_with_pipeline(self, text: str) -> str:
         """Process a command through the full CommandPipeline."""
