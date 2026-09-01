@@ -233,10 +233,25 @@ class AgentBrain:
         goal = intent["goal"].lower().strip()
         world = state.world
         steps: list[PlanStep] = []
-        step_id = 0
 
         goal_type = intent.get("type", "simple")
 
+        # For complex or research tasks, try LLM-assisted planning first
+        if goal_type in ("multi_step", "research") and self._provider and self._provider.is_available():
+            llm_steps = self._plan_with_llm(state, intent, world)
+            if llm_steps:
+                steps = llm_steps
+                for step in steps:
+                    state.add_step(step)
+                logger.info(
+                    "plan_created_with_llm",
+                    goal=goal[:60],
+                    steps=len(steps),
+                    step_descriptions=[s.description for s in steps],
+                )
+                return steps
+
+        # Fall back to rule-based planning
         if goal_type == "multi_step":
             steps = self._plan_multi_step(goal, world, state)
         elif intent.get("requires_browser"):
@@ -256,6 +271,118 @@ class AgentBrain:
             step_descriptions=[s.description for s in steps],
         )
         return steps
+
+    def _plan_with_llm(
+        self, state: AgentState, intent: dict[str, Any], world: WorldState,
+    ) -> list[PlanStep]:
+        """Use the LLM to generate a plan for complex goals.
+
+        Returns a list of PlanSteps, or empty list if LLM planning fails.
+        """
+        import json as _json
+        from pengu.models.base import ChatMessage
+
+        try:
+            # Build context about available tools
+            world_info = ""
+            if world.active_app:
+                world_info += f"Active app: {world.active_app}. "
+            if world.browser_open and world.browser_url:
+                world_info += f"Browser URL: {world.browser_url}. "
+            if world.current_directory:
+                world_info += f"Current directory: {world.current_directory}. "
+
+            available_actions = (
+                "open_app, navigate, web_search, browser_click, browser_type, browser_scroll, "
+                "browser_read, browser_search, click, type_text, desktop_click, desktop_type, "
+                "desktop_press, desktop_hotkey, desktop_focus, screen_inspect, "
+                "list_files, create_file, open_folder, chat, system_battery, system_volume, "
+                "system_wallpaper, system_info"
+            )
+
+            prompt = (
+                f"You are planning a task for a desktop assistant.\n"
+                f"Goal: {intent['goal']}\n"
+                f"\nAvailable actions: {available_actions}\n"
+            )
+            if world_info:
+                prompt += f"\nCurrent state: {world_info}\n"
+            prompt += (
+                f"\nReturn a JSON array of steps. Each step: {{\"action\": str, \"target\": str, "
+                f"\"description\": str, \"params\": {{}}}}\n"
+                f"Only include actions from the available list. 1-8 steps max.\n"
+                f"Return ONLY the JSON array, no other text."
+            )
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(
+                        asyncio.run,
+                        self._provider.chat(
+                            [ChatMessage(role="user", content=prompt)],
+                            temperature=0.2,
+                            max_tokens=512,
+                        ),
+                    )
+                    response = future.result(timeout=15)
+            else:
+                response = loop.run_until_complete(
+                    self._provider.chat(
+                        [ChatMessage(role="user", content=prompt)],
+                        temperature=0.2,
+                        max_tokens=512,
+                    )
+                )
+
+            if response.error or not response.content:
+                return []
+
+            content = response.content.strip()
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(lines[1:-1]).strip()
+
+            parsed = _json.loads(content)
+            if not isinstance(parsed, list):
+                return []
+
+            steps: list[PlanStep] = []
+            for i, item in enumerate(parsed[:8]):
+                action = item.get("action", "chat")
+                target = item.get("target", "")
+                description = item.get("description", action)
+                params = item.get("params", {})
+
+                # Validate action is in allowed list
+                allowed = {
+                    "open_app", "navigate", "web_search", "browser_click",
+                    "browser_type", "browser_scroll", "browser_read", "browser_search",
+                    "click", "type_text", "desktop_click", "desktop_type",
+                    "desktop_press", "desktop_hotkey", "desktop_focus",
+                    "screen_inspect", "list_files", "create_file",
+                    "open_folder", "chat", "system_battery", "system_volume",
+                    "system_wallpaper", "system_info",
+                }
+                if action not in allowed:
+                    action = "chat"
+                    params = {"text": target or description}
+
+                steps.append(PlanStep(
+                    step_id=i,
+                    action=action,
+                    target=target,
+                    description=description,
+                    params=params,
+                ))
+
+            logger.info("llm_plan_generated", steps=len(steps))
+            return steps
+
+        except Exception as e:
+            logger.debug("llm_planning_failed", error=str(e))
+            return []
 
     def decide_next(self, state: AgentState) -> AgentDecision:
         """

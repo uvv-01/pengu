@@ -433,6 +433,150 @@ async def system_info() -> ToolResult:
     return ToolResult(success=True, output={"summary": summary})
 
 
+async def system_battery() -> ToolResult:
+    """Get battery status: percentage, charging, time remaining."""
+    try:
+        import psutil
+        bat = psutil.sensors_battery()
+        if bat is None:
+            return ToolResult(
+                success=True,
+                output={"battery": False, "message": "No battery detected. This appears to be a desktop or external power."},
+            )
+        percent = bat.percent
+        plugged = bat.power_plugged
+        secs = bat.secsleft
+        if secs == -1:
+            time_left = "unknown"
+        elif secs < 0:
+            time_left = "unlimited (plugged in)"
+        else:
+            hours = int(secs // 3600)
+            mins = int((secs % 3600) // 60)
+            time_left = f"{hours}h {mins}m"
+        charging = "Charging" if plugged else "On battery"
+        summary = f"Battery: {percent}% - {charging} - Time remaining: {time_left}"
+        return ToolResult(
+            success=True,
+            output={
+                "battery": True,
+                "percent": percent,
+                "plugged": plugged,
+                "charging": plugged,
+                "secs_left": secs,
+                "time_left": time_left,
+                "summary": summary,
+            },
+        )
+    except Exception as e:
+        return ToolResult(success=False, error=f"Battery check failed: {e}")
+
+
+async def system_wallpaper(path: str = "") -> ToolResult:
+    """Set or get the desktop wallpaper.
+
+    If path is empty, returns the current wallpaper.
+    If path is provided, sets it as the wallpaper.
+    Accepts .jpg, .png, .bmp files.
+    """
+    import ctypes
+    from pathlib import Path
+
+    try:
+        if not path:
+            # Get current wallpaper
+            SPI_GETDESKWALLPAPER = 0x0073
+            buf = ctypes.create_unicode_buffer(512)
+            ctypes.windll.user32.SystemParametersInfoW(
+                SPI_GETDESKWALLPAPER, 512, buf, 0
+            )
+            current = buf.value or "(no wallpaper set)"
+            return ToolResult(
+                success=True,
+                output={"current_wallpaper": current, "summary": f"Current wallpaper: {current}"},
+            )
+
+        # Set wallpaper
+        wallpaper_path = Path(path).resolve()
+        if not wallpaper_path.exists():
+            return ToolResult(success=False, error=f"File not found: {path}")
+        if wallpaper_path.suffix.lower() not in ('.jpg', '.jpeg', '.png', '.bmp'):
+            return ToolResult(
+                success=False,
+                error=f"Unsupported image format: {wallpaper_path.suffix}. Use .jpg, .png, or .bmp.",
+            )
+
+        SPI_SETDESKWALLPAPER = 0x0014
+        SPIF_UPDATEINIFILE = 0x01
+        SPIF_SENDCHANGE = 0x02
+        result = ctypes.windll.user32.SystemParametersInfoW(
+            SPI_SETDESKWALLPAPER, 0, str(wallpaper_path),
+            SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+        )
+        if result:
+            return ToolResult(
+                success=True,
+                output={"wallpaper": str(wallpaper_path), "summary": f"Wallpaper changed to {wallpaper_path.name}"},
+            )
+        return ToolResult(success=False, error="SystemParametersInfo returned failure")
+    except Exception as e:
+        return ToolResult(success=False, error=f"Wallpaper operation failed: {e}")
+
+
+async def system_volume(action: str = "get", level: int = 0) -> ToolResult:
+    """Control system volume.
+
+    action: 'get', 'set', 'mute', 'unmute'
+    level: 0-100 (only for 'set')
+    """
+    try:
+        from ctypes import POINTER, cast
+        from comtypes import CLSCTX_ALL, CoInitialize
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+        try:
+            CoInitialize()
+        except Exception:
+            pass
+
+        speakers = AudioUtilities.GetSpeakers()
+        interface = speakers.Activate(
+            IAudioEndpointVolume._iid_, CLSCTX_ALL, None
+        )
+        volume = cast(interface, POINTER(IAudioEndpointVolume))
+
+        if action == "get":
+            mute = volume.GetMute()
+            vol = round(volume.GetMasterVolumeLevelScalar() * 100)
+            state = "Muted" if mute else f"Volume: {vol}%"
+            return ToolResult(
+                success=True,
+                output={"volume": vol, "muted": bool(mute), "summary": state},
+            )
+
+        elif action == "set":
+            level = max(0, min(100, level))
+            volume.SetMasterVolumeLevelScalar(level / 100.0, None)
+            return ToolResult(
+                success=True,
+                output={"volume": level, "summary": f"Volume set to {level}%"},
+            )
+
+        elif action == "mute":
+            volume.SetMute(1, None)
+            return ToolResult(success=True, output={"muted": True, "summary": "Muted"})
+
+        elif action == "unmute":
+            volume.SetMute(0, None)
+            return ToolResult(success=True, output={"muted": False, "summary": "Unmuted"})
+
+        return ToolResult(success=False, error=f"Unknown volume action: {action}")
+    except ImportError:
+        return ToolResult(success=False, error="pycaw not installed. Run: pip install pycaw")
+    except Exception as e:
+        return ToolResult(success=False, error=f"Volume control failed: {e}")
+
+
 # ---------------------------------------------------------------------------
 # VS Code tools (Day 3)
 # ---------------------------------------------------------------------------
@@ -770,6 +914,37 @@ def register_deterministic_tools(registry: ToolRegistry) -> None:
             permission_level=PermissionLevel.SAFE,
             parameters={"type": "object", "properties": {}},
             handler=system_info,
+        ),
+        Tool(
+            name="system.battery",
+            description="Get battery status: percentage, charging state, time remaining",
+            category="system",
+            permission_level=PermissionLevel.SAFE,
+            parameters={"type": "object", "properties": {}},
+            handler=system_battery,
+        ),
+        Tool(
+            name="system.wallpaper",
+            description="Get or set the desktop wallpaper",
+            category="system",
+            permission_level=PermissionLevel.LOW_RISK,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "default": "", "description": "Image file path to set as wallpaper (empty = get current)"},
+                },
+            },
+            handler=system_wallpaper,
+        ),
+        Tool(
+            name="system.volume",
+            description="Get or set system volume (get/set/mute/unmute)",
+            category="system",
+            permission_level=PermissionLevel.LOW_RISK,
+            parameters={
+                "type": "object",
+            },
+            handler=system_volume,
         ),
 
         # --- VS Code (Day 3) ---

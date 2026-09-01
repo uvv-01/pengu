@@ -266,6 +266,113 @@ class CommandPipeline:
                 provider="deterministic", error=tool_result.error,
             )
 
+        # --- Battery status ---
+        if action == "battery":
+            tool_result = await self.tool_registry.execute("system.battery")
+            if tool_result.success:
+                summary = tool_result.output.get("summary", "")
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent, response=summary,
+                    provider="deterministic", tool_used="system.battery",
+                    tool_result=tool_result,
+                )
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Battery check error: {tool_result.error}",
+                provider="deterministic", error=tool_result.error,
+            )
+
+        # --- Wallpaper ---
+        if action == "wallpaper":
+            import re as _re
+            path_match = _re.search(
+                r"(?:to|as)\s+(.+?)(?:\s*$)", text, _re.IGNORECASE,
+            )
+            wallpaper_path = path_match.group(1).strip().rstrip(".") if path_match else ""
+            # If the extracted path looks like a full path, use it; otherwise try to resolve
+            if wallpaper_path and not _re.match(r'^[A-Z]:\\', wallpaper_path, _re.IGNORECASE):
+                # Try as a filename in common locations
+                from pathlib import Path as _Path
+                candidates = [
+                    _Path.home() / "Pictures" / wallpaper_path,
+                    _Path.home() / "Downloads" / wallpaper_path,
+                    _Path.home() / "Desktop" / wallpaper_path,
+                    _Path(wallpaper_path),
+                ]
+                for c in candidates:
+                    if c.exists():
+                        wallpaper_path = str(c)
+                        break
+                else:
+                    # If nothing found, just pass the raw string to let the tool report the error
+                    pass
+            tool_result = await self.tool_registry.execute(
+                "system.wallpaper", path=wallpaper_path,
+            )
+            if tool_result.success:
+                summary = tool_result.output.get("summary", "")
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent, response=summary,
+                    provider="deterministic", tool_used="system.wallpaper",
+                    tool_result=tool_result,
+                )
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Wallpaper error: {tool_result.error}",
+                provider="deterministic", error=tool_result.error,
+            )
+
+        # --- Volume control ---
+        if action == "volume":
+            import re as _re
+            text_lower_vol = text.lower().strip()
+
+            # Determine the volume action
+            vol_action = "get"
+            vol_level = 0
+
+            mute_match = _re.search(r"\b(mute|silence|unmute|unsilence)\b", text_lower_vol)
+            if mute_match:
+                verb = mute_match.group(1)
+                vol_action = "mute" if verb in ("mute", "silence") else "unmute"
+            else:
+                set_match = _re.search(r"\b(?:set|turn|change)\s+volume\s+(?:to\s+)?(\d+)", text_lower_vol)
+                if set_match:
+                    vol_action = "set"
+                    vol_level = int(set_match.group(1))
+                elif _re.search(r"volume\s+(?:to\s+)?(\d+)", text_lower_vol):
+                    m2 = _re.search(r"volume\s+(?:to\s+)?(\d+)", text_lower_vol)
+                    vol_action = "set"
+                    vol_level = int(m2.group(1))
+                elif "up" in text_lower_vol or "louder" in text_lower_vol:
+                    vol_action = "set"
+                    vol_level = 75  # default step up
+                elif "down" in text_lower_vol or "quieter" in text_lower_vol:
+                    vol_action = "set"
+                    vol_level = 25  # default step down
+
+            tool_result = await self.tool_registry.execute(
+                "system.volume", action=vol_action, level=vol_level,
+            )
+            if tool_result.success:
+                summary = tool_result.output.get("summary", "")
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent, response=summary,
+                    provider="deterministic", tool_used="system.volume",
+                    tool_result=tool_result,
+                )
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response=f"Volume error: {tool_result.error}",
+                provider="deterministic", error=tool_result.error,
+            )
+
         # --- Process management ---
         if action == "process":
             # Check if asking if something is running

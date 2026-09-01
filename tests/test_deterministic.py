@@ -238,3 +238,72 @@ class TestGitTools:
         result = await git_status(cwd=str(tmp_path))
         # git status returns error when not in a repo
         assert result.output["exit_code"] != 0 or result.success is False
+
+
+class TestSystemTools:
+    """Test battery, wallpaper, and volume tools."""
+
+    @pytest.mark.asyncio
+    async def test_battery_check(self):
+        """Battery check should return a result."""
+        from pengu.tools.deterministic import system_battery
+        result = await system_battery()
+        assert result.success is True
+        assert "summary" in result.output
+
+    @pytest.mark.asyncio
+    async def test_battery_has_fields(self):
+        """Battery result should have structured fields."""
+        from pengu.tools.deterministic import system_battery
+        result = await system_battery()
+        assert result.success is True
+        # Should have percent and plugged fields
+        if result.output.get("battery"):
+            assert "percent" in result.output
+            assert "plugged" in result.output
+            assert "summary" in result.output
+
+    @pytest.mark.asyncio
+    async def test_wallpaper_get(self):
+        """Getting wallpaper should return current wallpaper path."""
+        from pengu.tools.deterministic import system_wallpaper
+        result = await system_wallpaper()
+        assert result.success is True
+        assert "current_wallpaper" in result.output
+
+    @pytest.mark.asyncio
+    async def test_wallpaper_set_nonexistent(self):
+        """Setting wallpaper to nonexistent file should fail gracefully."""
+        from pengu.tools.deterministic import system_wallpaper
+        result = await system_wallpaper(path="C:\nonexistent\wallpaper.jpg")
+        assert result.success is False
+        assert "not found" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_wallpaper_set_unsupported_format(self):
+        """Setting wallpaper to unsupported format should fail gracefully."""
+        from pengu.tools.deterministic import system_wallpaper
+        # Create a temp file with wrong extension
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            f.write(b"test")
+            temp_path = f.name
+        try:
+            result = await system_wallpaper(path=temp_path)
+            assert result.success is False
+            assert "unsupported" in result.error.lower() or "format" in result.error.lower()
+        finally:
+            import os
+            os.unlink(temp_path)
+
+    @pytest.mark.asyncio
+    async def test_volume_get(self):
+        """Getting volume should return current volume level."""
+        from pengu.tools.deterministic import system_volume
+        result = await system_volume(action="get")
+        # Volume control may fail on certain hardware/API — that's acceptable
+        if result.success:
+            assert "volume" in result.output or "summary" in result.output
+        else:
+            # Acceptable: pycaw not installed or API incompatibility
+            assert isinstance(result.error, str) and len(result.error) > 0

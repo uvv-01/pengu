@@ -268,3 +268,83 @@ class TestRouterPriority:
         """'write a Python program' should be CODING, not FILE_OPERATION."""
         intent = router.classify("write a Python program to sort a list")
         assert intent.category == TaskCategory.CODING
+
+
+class TestSystemControlRouter:
+    """Test battery, wallpaper, volume routing."""
+
+    def test_battery_status(self, router):
+        """'What's my battery?' should be SYSTEM_CONTROL with battery action."""
+        intent = router.classify("What's my battery percentage?")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "battery"
+
+    def test_battery_charging(self, router):
+        """'Am I charging?' should route to battery."""
+        intent = router.classify("Am I charging?")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "battery"
+
+    def test_battery_level(self, router):
+        """'How much battery do I have?' should route to battery."""
+        intent = router.classify("How much battery do I have?")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "battery"
+
+    def test_wallpaper_change(self, router):
+        """'Change my wallpaper' should route to wallpaper."""
+        intent = router.classify("Change my wallpaper")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "wallpaper"
+
+    def test_wallpaper_set(self, router):
+        """'Set wallpaper to photo.jpg' should route to wallpaper."""
+        intent = router.classify("Set wallpaper to photo.jpg")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "wallpaper"
+
+    def test_volume_get(self, router):
+        """'What's my volume?' should route to volume."""
+        intent = router.classify("What's my volume?")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "volume"
+
+    def test_volume_set(self, router):
+        """'Set volume to 50' should route to volume."""
+        intent = router.classify("Set volume to 50")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "volume"
+
+    def test_mute(self, router):
+        """'Mute' should route to volume."""
+        intent = router.classify("Mute the sound")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "volume"
+
+    def test_unmute(self, router):
+        """'Unmute' should route to volume."""
+        intent = router.classify("Unmute")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "volume"
+
+    def test_volume_up(self, router):
+        """'Volume up' should route to volume."""
+        intent = router.classify("Turn volume up")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "volume"
+
+    def test_volume_down(self, router):
+        """'Volume down' should route to volume."""
+        intent = router.classify("Volume down")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+        assert intent.extracted_action == "volume"
+
+    def test_battery_over_chat(self, router):
+        """'battery' should route to SYSTEM_CONTROL, not CHAT."""
+        intent = router.classify("What is my battery status")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL
+
+    def test_wallpaper_over_chat(self, router):
+        """'wallpaper' should route to SYSTEM_CONTROL, not CHAT."""
+        intent = router.classify("Change my desktop background")
+        assert intent.category == TaskCategory.SYSTEM_CONTROL

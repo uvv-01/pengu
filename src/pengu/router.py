@@ -280,6 +280,61 @@ VISION_RULES: list[Rule] = [
     ),
 ]
 
+# Battery patterns
+BATTERY_RULES: list[Rule] = [
+    Rule(
+        category=TaskCategory.SYSTEM_CONTROL,
+        patterns=_compile([
+            r"\bwhat('s|\s+is)\s+(my\s+)?battery\b",
+            r"\bhow\s+(much|much\s+is)\s+(my\s+)?battery\b",
+            r"\bbattery\s+(percentage|level|status|health)\b",
+            r"\bam\s+i\s+(charging|plugged)\b",
+            r"\bhow\s+long\s+(will|does)\s+(the\s+)?battery\s+last\b",
+            r"\bbattery\s+charging\b",
+            r"\bcharging\s+status\b",
+            r"\bwhat('s|\s+is)\s+(my\s+)?(battery|charge)\b",
+        ]),
+        action="battery",
+        confidence=0.95,
+        description="Battery status queries",
+    ),
+]
+
+# Wallpaper patterns
+WALLPAPER_RULES: list[Rule] = [
+    Rule(
+        category=TaskCategory.SYSTEM_CONTROL,
+        patterns=_compile([
+            r"\b(change|set|put)\s+(my\s+)?wallpaper\b",
+            r"\bwallpaper\b",
+            r"\bdesktop\s+(background|image|picture|photo)\b",
+            r"\b(change|set)\s+(my\s+)?desktop\s+(background|image)\b",
+        ]),
+        action="wallpaper",
+        confidence=0.9,
+        description="Desktop wallpaper operations",
+    ),
+]
+
+# Volume patterns
+VOLUME_RULES: list[Rule] = [
+    Rule(
+        category=TaskCategory.SYSTEM_CONTROL,
+        patterns=_compile([
+            r"\b(set|turn|change)\s+volume\s+(to\s+)?(\d+)\b",
+            r"\bvolume\s+(to\s+)?(\d+)\b",
+            r"\b(mute|unmute|silence|unsilence)\b",
+            r"\b(volume|sound)\s+(up|down|louder|quieter)\b",
+            r"\bwhat('s|\s+is)\s+(my\s+)?(volume|sound)\b",
+            r"\bhow\s+loud\b",
+            r"\b(volume|sound)\s+status\b",
+        ]),
+        action="volume",
+        confidence=0.9,
+        description="System volume control",
+    ),
+]
+
 # Network patterns
 NETWORK_RULES: list[Rule] = [
     Rule(
@@ -326,6 +381,9 @@ CHAT_RULES: list[Rule] = [
 # All rules in priority order
 ALL_RULES: list[Rule] = (
     SYSTEM_INFO_RULES
+    + BATTERY_RULES
+    + WALLPAPER_RULES
+    + VOLUME_RULES
     + PROCESS_RULES
     + VSCODE_RULES
     + GIT_RULES

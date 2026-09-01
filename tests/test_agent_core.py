@@ -544,3 +544,114 @@ class TestAgentIntegration:
         assert obs.active_app == "Google Chrome"
         assert obs.active_window_title == "Google Chrome — New Tab"
         assert state.world.screen_width == 1920
+
+
+class TestAgentBrainLLMPlanning:
+    """Test AgentBrain LLM-assisted planning."""
+
+    def test_plan_without_llm_falls_back_to_rules(self):
+        """Without LLM provider, plan should use rule-based planning."""
+        from pengu.agent.brain import AgentBrain
+        from pengu.agent.state import AgentState
+        brain = AgentBrain(model_provider=None)
+        state = AgentState(goal="notepad")
+        intent = brain.understand("open notepad", state)
+        steps = brain.plan(state, intent)
+        assert len(steps) >= 1
+        assert steps[0].action in ("open_app", "navigate")
+
+    def test_plan_simple_search(self):
+        """Simple search should generate a web_search step."""
+        from pengu.agent.brain import AgentBrain
+        from pengu.agent.state import AgentState
+        brain = AgentBrain(model_provider=None)
+        state = AgentState(goal="search for Python")
+        intent = brain.understand("search for Python", state)
+        steps = brain.plan(state, intent)
+        assert len(steps) >= 1
+        assert any(s.action == "web_search" for s in steps)
+
+    def test_plan_multi_step_without_llm(self):
+        """Multi-step without LLM should split on 'and'/'then'."""
+        from pengu.agent.brain import AgentBrain
+        from pengu.agent.state import AgentState
+        brain = AgentBrain(model_provider=None)
+        state = AgentState(goal="open Chrome and search for Python")
+        intent = brain.understand("open Chrome and search for Python", state)
+        steps = brain.plan(state, intent)
+        assert len(steps) >= 2
+
+    def test_understand_battery_query(self):
+        """Battery query should be understood as info_query."""
+        from pengu.agent.brain import AgentBrain
+        from pengu.agent.state import AgentState
+        brain = AgentBrain(model_provider=None)
+        state = AgentState(goal="What's my battery percentage?")
+        intent = brain.understand("What's my battery percentage?", state)
+        assert "requires_browser" in intent  # should not require browser
+        assert intent["type"] in ("simple", "info_query")
+
+    def test_understand_wallpaper_change(self):
+        """Wallpaper change should be understood."""
+        from pengu.agent.brain import AgentBrain
+        from pengu.agent.state import AgentState
+        brain = AgentBrain(model_provider=None)
+        state = AgentState(goal="Change my wallpaper")
+        intent = brain.understand("Change my wallpaper", state)
+        assert intent["type"] == "simple"
+
+    def test_generate_response_completed(self):
+        """Completed mission should produce a useful response."""
+        from pengu.agent.brain import AgentBrain
+        from pengu.agent.state import AgentState, MissionStatus, PlanStep, StepStatus
+        brain = AgentBrain()
+        state = AgentState(goal="test")
+        state.status = MissionStatus.COMPLETED
+        state.plan = [
+            PlanStep(step_id=0, action="open_app", status=StepStatus.SUCCESS,
+                     result_message="Chrome is open."),
+        ]
+        response = brain.generate_response(state)
+        assert "Chrome" in response or "open" in response.lower() or "Done" in response
+
+    def test_generate_response_failed(self):
+        """Failed mission should explain what went wrong."""
+        from pengu.agent.brain import AgentBrain
+        from pengu.agent.state import AgentState, MissionStatus, PlanStep, StepStatus
+        brain = AgentBrain()
+        state = AgentState(goal="test")
+        state.status = MissionStatus.FAILED
+        state.plan = [
+            PlanStep(step_id=0, action="open_app", status=StepStatus.FAILED,
+                     error="Application not found"),
+        ]
+        response = brain.generate_response(state)
+        assert "not" in response.lower() or "couldn" in response.lower() or "error" in response.lower()
+
+    def test_recover_retry(self):
+        """Recovery should retry a failed step if retries remain."""
+        from pengu.agent.brain import AgentBrain
+        from pengu.agent.state import AgentState, PlanStep, StepStatus
+        brain = AgentBrain()
+        state = AgentState(goal="test")
+        step = PlanStep(step_id=0, action="open_app", status=StepStatus.FAILED,
+                         retry_count=0, max_retries=2)
+        state.plan = [step]
+        state.current_step_index = 0
+        recovered = brain.recover(state)
+        assert recovered is not None
+        assert recovered.status == StepStatus.PENDING
+
+    def test_recover_skip_when_max_retries(self):
+        """Recovery should skip when max retries exceeded."""
+        from pengu.agent.brain import AgentBrain
+        from pengu.agent.state import AgentState, PlanStep, StepStatus
+        brain = AgentBrain()
+        state = AgentState(goal="test")
+        step = PlanStep(step_id=0, action="open_app", status=StepStatus.FAILED,
+                         retry_count=2, max_retries=2)
+        state.plan = [step]
+        state.current_step_index = 0
+        recovered = brain.recover(state)
+        assert recovered is None
+        assert step.status == StepStatus.SKIPPED

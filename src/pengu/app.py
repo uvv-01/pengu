@@ -674,9 +674,20 @@ class PenguApp:
         # Check if the goal needs browser/desktop agent capabilities
         goal_lower = text.lower().strip()
         agent_triggers = [
+            # Browser / search
             "search", "google", "browse", "find out", "research",
-            "what is", "what's", "tell me", "summarize", "check",
             "read page", "scroll", "click", "first result",
+            # Information queries
+            "what is", "what's", "tell me", "summarize", "check",
+            "how much", "how many", "which", "where is", "what laptop",
+            "what computer", "what cpu", "what ram",
+            # System information
+            "battery", "charging", "wifi", "network",
+            "volume", "mute", "wallpaper",
+            "system info", "specs", "hardware",
+            # Open-ended tasks
+            "organize", "prepare", "find", "research",
+            "open chatgpt", "open github", "open youtube",
         ]
         if any(trigger in goal_lower for trigger in agent_triggers):
             return self._process_with_agent(text)
