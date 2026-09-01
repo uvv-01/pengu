@@ -294,7 +294,9 @@ class AgentBrain:
 
             available_actions = (
                 "open_app, navigate, web_search, browser_click, browser_type, browser_scroll, "
-                "browser_read, browser_search, click, type_text, desktop_click, desktop_type, "
+                "browser_read, browser_search, browser_get_state, browser_type_in_field, "
+                "browser_submit, browser_verify, browser_find_elements, browser_refresh, "
+                "click, type_text, desktop_click, desktop_type, "
                 "desktop_press, desktop_hotkey, desktop_focus, screen_inspect, "
                 "list_files, create_file, open_folder, chat, system_battery, system_volume, "
                 "system_wallpaper, system_info"
@@ -359,6 +361,8 @@ class AgentBrain:
                 allowed = {
                     "open_app", "navigate", "web_search", "browser_click",
                     "browser_type", "browser_scroll", "browser_read", "browser_search",
+                    "browser_get_state", "browser_type_in_field", "browser_submit",
+                    "browser_verify", "browser_find_elements", "browser_refresh",
                     "click", "type_text", "desktop_click", "desktop_type",
                     "desktop_press", "desktop_hotkey", "desktop_focus",
                     "screen_inspect", "list_files", "create_file",
@@ -690,7 +694,14 @@ class AgentBrain:
         return steps
 
     def _plan_browser_task(self, goal: str, world: WorldState, state: AgentState) -> list[PlanStep]:
-        """Plan a task that requires browser interaction."""
+        """Plan a task that requires browser interaction.
+
+        Uses observe → act → verify pattern:
+        1. Navigate to site (if needed)
+        2. Observe the page state
+        3. Perform actions (type, click, etc.)
+        4. Verify the result
+        """
         goal_lower = goal.lower().strip()
         steps: list[PlanStep] = []
         step_id = 0
@@ -698,16 +709,18 @@ class AgentBrain:
         # Check if browser is already open
         browser_already_open = world.is_browser_active() or world.browser_open
 
+        import re
+
         # Detect if the goal involves opening a specific site
         site_open_patterns = [
-            (r"open\s+(google|chrome)", "google", "https://www.google.com"),
-            (r"open\s+(github)", "github", "https://github.com"),
-            (r"open\s+(youtube)", "youtube", "https://www.youtube.com"),
-            (r"open\s+(chatgpt|chat\s*gpt)", "chatgpt", "https://chatgpt.com"),
-            (r"open\s+(stackoverflow|stack\s*overflow)", "stackoverflow", "https://stackoverflow.com"),
+            (r"open\s+(google|chrome)\b", "google", "https://www.google.com"),
+            (r"open\s+(github)\b", "github", "https://github.com"),
+            (r"open\s+(youtube)\b", "youtube", "https://www.youtube.com"),
+            (r"open\s+(chatgpt|chat\s*gpt)\b", "chatgpt", "https://chatgpt.com"),
+            (r"open\s+(stackoverflow|stack\s*overflow)\b", "stackoverflow", "https://stackoverflow.com"),
         ]
 
-        import re
+        site_opened = False
         for pattern, name, url in site_open_patterns:
             if re.search(pattern, goal_lower):
                 if not (world.browser_url and name in world.browser_url.lower()):
@@ -717,7 +730,17 @@ class AgentBrain:
                         params={"url": url},
                     ))
                     step_id += 1
+                    site_opened = True
                 break
+
+        # Step: Observe the page after navigation
+        if site_opened:
+            steps.append(PlanStep(
+                step_id=step_id, action="browser_get_state", target="",
+                description="Observe the page state",
+                params={},
+            ))
+            step_id += 1
 
         # Detect search query
         search_match = re.search(
@@ -727,28 +750,92 @@ class AgentBrain:
         if search_match:
             query = search_match.group(1).strip().rstrip(".")
             if query:
+                # Check if the goal implies searching on a specific site
+                on_site = re.search(r"on\s+(chatgpt|google|github|youtube)\s+(?:for\s+)?", goal_lower)
+                if on_site:
+                    site = on_site.group(1).lower()
+                    if site == "chatgpt":
+                        steps.append(PlanStep(
+                            step_id=step_id, action="navigate",
+                            target="https://chatgpt.com",
+                            description="Open ChatGPT",
+                            params={"url": "https://chatgpt.com"},
+                        ))
+                        step_id += 1
+                        steps.append(PlanStep(
+                            step_id=step_id, action="browser_type_in_field",
+                            target=query,
+                            description=f"Type query into ChatGPT: {query}",
+                            params={"field_text": "Message", "value": query},
+                        ))
+                        step_id += 1
+                        steps.append(PlanStep(
+                            step_id=step_id, action="browser_submit",
+                            target="",
+                            description="Submit the query",
+                            params={},
+                        ))
+                        step_id += 1
+                    else:
+                        steps.append(PlanStep(
+                            step_id=step_id, action="web_search", target=query,
+                            description=f"Search for {query}",
+                            params={"query": query},
+                        ))
+                        step_id += 1
+                else:
+                    steps.append(PlanStep(
+                        step_id=step_id, action="web_search", target=query,
+                        description=f"Search for {query}",
+                        params={"query": query},
+                    ))
+                    step_id += 1
+
+                # Verify search results
                 steps.append(PlanStep(
-                    step_id=step_id, action="web_search", target=query,
-                    description=f"Search for {query}",
-                    params={"query": query},
+                    step_id=step_id, action="browser_verify", target="",
+                    description=f"Verify search results for {query}",
+                    params={},
                 ))
                 step_id += 1
 
+        # Detect type into field
+        type_match = re.search(
+            r"type\s+(?:into\s+)?(?:the\s+)?(.+?)\s+(?:with|as|:|field)\s+(.+)",
+            goal_lower,
+        )
+        if type_match:
+            field = type_match.group(1).strip()
+            value = type_match.group(2).strip()
+            steps.append(PlanStep(
+                step_id=step_id, action="browser_type_in_field", target=field,
+                description=f"Type '{value}' into '{field}'",
+                params={"field_text": field, "value": value},
+            ))
+            step_id += 1
+
         # Detect click
-        click_match = re.search(r"click\s+(?:the\s+)?(.+)", goal_lower)
+        click_match = re.search(r"click\s+(?:the\s+|on\s+)?(.+)", goal_lower)
         if click_match:
             target = click_match.group(1).strip()
             steps.append(PlanStep(
-                step_id=step_id, action="click", target=target,
+                step_id=step_id, action="browser_click", target=target,
                 description=f"Click {target}",
                 params={"text": target},
             ))
             step_id += 1
+            # Observe after click
+            steps.append(PlanStep(
+                step_id=step_id, action="browser_get_state", target="",
+                description=f"Observe page after clicking {target}",
+                params={},
+            ))
+            step_id += 1
 
         # Detect read
-        if any(w in goal_lower for w in ["read", "what's on", "what is on", "tell me about"]):
+        if any(w in goal_lower for w in ["read", "what's on", "what is on", "tell me about", "what does"]):
             steps.append(PlanStep(
-                step_id=step_id, action="read_page", target="",
+                step_id=step_id, action="browser_read", target="",
                 description="Read page content",
                 params={},
             ))

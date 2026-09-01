@@ -170,9 +170,16 @@ class MissionManager:
         Run the core observe → think → act → verify loop.
 
         This is the heart of the autonomous agent.
+        Includes loop detection to prevent infinite repeated actions.
         """
         max_iterations = 30  # safety limit
         iteration = 0
+
+        # Loop detection: track recent actions to detect stuck patterns
+        _action_window: list[str] = []  # last N action signatures
+        _MAX_REPEAT_THRESHOLD = 3  # if same action signature appears 3x in a row, break loop
+        _consecutive_same_count = 0
+        _last_action_sig = ""
 
         # Step 1: Understand the goal
         intent = self._brain.understand(state.goal, state)
@@ -209,12 +216,45 @@ class MissionManager:
                 self._brain.plan(state, intent)
 
             elif decision.value == "act":
+                # Build action signature for loop detection
+                current = state.current_step()
+                action_sig = f"{current.action}:{current.target}" if current else f"unknown:{iteration}"
+
+                # Check for repeated action pattern
+                if action_sig == _last_action_sig:
+                    _consecutive_same_count += 1
+                else:
+                    _consecutive_same_count = 1
+                _last_action_sig = action_sig
+                _action_window.append(action_sig)
+                if len(_action_window) > 10:
+                    _action_window.pop(0)
+
+                if _consecutive_same_count >= _MAX_REPEAT_THRESHOLD:
+                    logger.warning(
+                        "loop_detected",
+                        action=action_sig,
+                        repeats=_consecutive_same_count,
+                    )
+                    # Try replanning instead of repeating
+                    self._brain.replan(state, reason=f"loop detected: {action_sig} repeated {_consecutive_same_count} times")
+                    _consecutive_same_count = 0
+                    _last_action_sig = ""
+                    if not state.plan:
+                        state.mark_failed("Detected a loop — could not find an alternative approach.")
+                        break
+                    continue
+
                 result = await self._brain.act(state, executor)
                 if self._on_action_complete:
                     self._on_action_complete(state, result)
 
                 # Observe after action to verify
                 self._brain.observe(state)
+
+                # Reset consecutive count on successful action
+                if result.get("success"):
+                    _consecutive_same_count = 0
 
             elif decision.value == "recover":
                 recovered = self._brain.recover(state)
@@ -224,6 +264,8 @@ class MissionManager:
 
             elif decision.value == "replan":
                 self._brain.replan(state, reason="too many failures")
+                _consecutive_same_count = 0
+                _last_action_sig = ""
                 if not state.plan:
                     state.mark_failed("Could not complete the task after multiple attempts.")
                     break

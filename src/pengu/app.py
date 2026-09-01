@@ -677,17 +677,24 @@ class PenguApp:
             # Browser / search
             "search", "google", "browse", "find out", "research",
             "read page", "scroll", "click", "first result",
+            # Multi-application tasks
+            "and then", "after that", "next",
             # Information queries
             "what is", "what's", "tell me", "summarize", "check",
             "how much", "how many", "which", "where is", "what laptop",
-            "what computer", "what cpu", "what ram",
+            "what computer", "what cpu", "what ram", "what's my",
             # System information
             "battery", "charging", "wifi", "network",
             "volume", "mute", "wallpaper",
             "system info", "specs", "hardware",
-            # Open-ended tasks
-            "organize", "prepare", "find", "research",
+            # ChatGPT / GitHub specific
             "open chatgpt", "open github", "open youtube",
+            "ask chatgpt", "search chatgpt", "ask github",
+            # Open-ended / complex tasks
+            "organize", "prepare", "find", "research",
+            "navigate to", "go to", "open the",
+            # Desktop interaction
+            "what's on my screen", "what's on screen", "what do you see",
         ]
         if any(trigger in goal_lower for trigger in agent_triggers):
             return self._process_with_agent(text)
@@ -750,7 +757,7 @@ class PenguApp:
     def _map_action_to_tool(self, action: str) -> Optional[str]:
         """Map an agent action name to a registered tool name."""
         action_map = {
-            # Browser
+            # Browser — core
             "open_app": "application.open",
             "navigate": "browser.navigate",
             "web_search": "web_search.search",
@@ -758,6 +765,22 @@ class PenguApp:
             "type_text": "browser.type",
             "read_page": "browser.read",
             "scroll": "browser.scroll",
+            # Browser — observe / interact
+            "browser_get_state": "browser.get_state",
+            "browser_type_in_field": "browser.type_in_field",
+            "browser_submit": "browser.submit",
+            "browser_verify": "browser.verify",
+            "browser_find_elements": "browser.find_elements",
+            "browser_refresh": "browser.refresh",
+            "browser_search": "browser.search",
+            "browser_click": "browser.click",
+            "browser_type": "browser.type",
+            "browser_read": "browser.read",
+            "browser_scroll": "browser.scroll",
+            "browser_open": "browser.open",
+            "browser_close": "browser.close",
+            "browser_get_url": "browser.get_url",
+            "browser_get_title": "browser.get_title",
             # Desktop
             "desktop_click": "desktop.click",
             "desktop_type": "desktop.type",
@@ -773,6 +796,13 @@ class PenguApp:
             "list_files": "filesystem.list_directory",
             "create_file": "filesystem.write_file",
             "create_folder": "filesystem.write_file",
+            # System
+            "system_battery": "system.battery",
+            "system_volume": "system.volume",
+            "system_wallpaper": "system.wallpaper",
+            "system_info": "system.info",
+            # Web search
+            "web_search_fetch": "web_search.fetch",
             # Chat
             "chat": None,  # Falls through to LLM
         }

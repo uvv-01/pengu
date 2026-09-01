@@ -38,7 +38,6 @@ def _run_async(coro) -> Any:
         loop = None
 
     if loop and loop.is_running():
-        # We're inside a running loop — run in a thread
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             def _run():
                 new_loop = asyncio.new_event_loop()
@@ -90,28 +89,36 @@ async def browser_back() -> ToolResult:
     """Navigate back in browser history."""
     from pengu.agent.browser_agent import get_browser_agent
     agent = get_browser_agent()
-    if not agent._page:
-        return ToolResult(success=False, error="Browser not open")
-    try:
-        await agent._page.go_back()
-        title = await agent._page.title()
-        return ToolResult(success=True, output={"message": f"Navigated back. Page: {title}"})
-    except Exception as e:
-        return ToolResult(success=False, error=str(e))
+    result = await agent.go_back()
+    return ToolResult(
+        success=result.success,
+        output={"message": result.message},
+        error=result.error,
+    )
 
 
 async def browser_forward() -> ToolResult:
     """Navigate forward in browser history."""
     from pengu.agent.browser_agent import get_browser_agent
     agent = get_browser_agent()
-    if not agent._page:
-        return ToolResult(success=False, error="Browser not open")
-    try:
-        await agent._page.go_forward()
-        title = await agent._page.title()
-        return ToolResult(success=True, output={"message": f"Navigated forward. Page: {title}"})
-    except Exception as e:
-        return ToolResult(success=False, error=str(e))
+    result = await agent.go_forward()
+    return ToolResult(
+        success=result.success,
+        output={"message": result.message},
+        error=result.error,
+    )
+
+
+async def browser_refresh() -> ToolResult:
+    """Refresh the current page."""
+    from pengu.agent.browser_agent import get_browser_agent
+    agent = get_browser_agent()
+    result = await agent.refresh()
+    return ToolResult(
+        success=result.success,
+        output={"message": result.message},
+        error=result.error,
+    )
 
 
 async def browser_click(text: str) -> ToolResult:
@@ -131,6 +138,30 @@ async def browser_type(text: str) -> ToolResult:
     from pengu.agent.browser_agent import get_browser_agent
     agent = get_browser_agent()
     result = await agent.type_in_page(text)
+    return ToolResult(
+        success=result.success,
+        output={"message": result.message},
+        error=result.error,
+    )
+
+
+async def browser_type_in_field(field_text: str, value: str) -> ToolResult:
+    """Type text into a specific field identified by its label/placeholder/name."""
+    from pengu.agent.browser_agent import get_browser_agent
+    agent = get_browser_agent()
+    result = await agent.type_in_field(field_text, value)
+    return ToolResult(
+        success=result.success,
+        output={"message": result.message},
+        error=result.error,
+    )
+
+
+async def browser_submit() -> ToolResult:
+    """Submit the current form (press Enter)."""
+    from pengu.agent.browser_agent import get_browser_agent
+    agent = get_browser_agent()
+    result = await agent.submit_form()
     return ToolResult(
         success=result.success,
         output={"message": result.message},
@@ -162,6 +193,35 @@ async def browser_read(max_chars: int = 5000) -> ToolResult:
     )
 
 
+async def browser_get_state() -> ToolResult:
+    """Get structured browser state (interactive elements, headings, links, text)."""
+    from pengu.agent.browser_agent import get_browser_agent
+    agent = get_browser_agent()
+    state = await agent.get_browser_state()
+    return ToolResult(
+        success=state.is_ready,
+        output=state.to_dict(),
+        error=state.error,
+    )
+
+
+async def browser_find_elements(element_type: str = "") -> ToolResult:
+    """Find interactive elements on the page, optionally filtered by type."""
+    from pengu.agent.browser_agent import get_browser_agent
+    agent = get_browser_agent()
+    state = await agent.get_browser_state()
+    elements = state.interactive_elements
+    if element_type:
+        elements = [e for e in elements if e.element_type == element_type]
+    return ToolResult(
+        success=True,
+        output={
+            "elements": [e.to_dict() for e in elements],
+            "count": len(elements),
+        },
+    )
+
+
 async def browser_search(query: str) -> ToolResult:
     """Search Google for a query via the browser."""
     from pengu.agent.browser_agent import get_browser_agent
@@ -170,6 +230,26 @@ async def browser_search(query: str) -> ToolResult:
     return ToolResult(
         success=result.success,
         output={"message": result.message},
+        error=result.error,
+    )
+
+
+async def browser_verify(
+    expected_url: str = "",
+    expected_title: str = "",
+    expected_text: str = "",
+) -> ToolResult:
+    """Verify the current page state matches expectations."""
+    from pengu.agent.browser_agent import get_browser_agent
+    agent = get_browser_agent()
+    result = await agent.verify_action(
+        expected_url=expected_url or None,
+        expected_title=expected_title or None,
+        expected_text=expected_text or None,
+    )
+    return ToolResult(
+        success=result.success,
+        output={"message": result.message, "metadata": result.metadata},
         error=result.error,
     )
 
@@ -409,6 +489,14 @@ def register_agent_tools(registry: ToolRegistry) -> None:
             handler=browser_forward,
         ),
         Tool(
+            name="browser.refresh",
+            description="Refresh the current page",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters={"type": "object", "properties": {}},
+            handler=browser_refresh,
+        ),
+        Tool(
             name="browser.click",
             description="Click an element by visible text on the current page",
             category="browser",
@@ -435,6 +523,29 @@ def register_agent_tools(registry: ToolRegistry) -> None:
                 "required": ["text"],
             },
             handler=browser_type,
+        ),
+        Tool(
+            name="browser.type_in_field",
+            description="Type text into a specific input field identified by its label, placeholder, or name",
+            category="browser",
+            permission_level=PermissionLevel.LOW_RISK,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "field_text": {"type": "string", "description": "Label, placeholder, or name of the field"},
+                    "value": {"type": "string", "description": "Text to type into the field"},
+                },
+                "required": ["field_text", "value"],
+            },
+            handler=browser_type_in_field,
+        ),
+        Tool(
+            name="browser.submit",
+            description="Submit the current form (press Enter)",
+            category="browser",
+            permission_level=PermissionLevel.LOW_RISK,
+            parameters={"type": "object", "properties": {}},
+            handler=browser_submit,
         ),
         Tool(
             name="browser.scroll",
@@ -464,6 +575,32 @@ def register_agent_tools(registry: ToolRegistry) -> None:
             handler=browser_read,
         ),
         Tool(
+            name="browser.get_state",
+            description="Get structured browser state: interactive elements, headings, links, page text",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters={"type": "object", "properties": {}},
+            handler=browser_get_state,
+        ),
+        Tool(
+            name="browser.find_elements",
+            description="Find interactive elements on the page (inputs, buttons, links), optionally filtered by type",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "element_type": {
+                        "type": "string",
+                        "enum": ["", "input", "button", "link", "textarea", "select"],
+                        "default": "",
+                        "description": "Filter by element type (empty = all)",
+                    },
+                },
+            },
+            handler=browser_find_elements,
+        ),
+        Tool(
             name="browser.search",
             description="Search Google for a query via the browser",
             category="browser",
@@ -476,6 +613,21 @@ def register_agent_tools(registry: ToolRegistry) -> None:
                 "required": ["query"],
             },
             handler=browser_search,
+        ),
+        Tool(
+            name="browser.verify",
+            description="Verify the current page state matches expectations (URL, title, or text)",
+            category="browser",
+            permission_level=PermissionLevel.SAFE,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "expected_url": {"type": "string", "default": "", "description": "Expected URL substring"},
+                    "expected_title": {"type": "string", "default": "", "description": "Expected title substring"},
+                    "expected_text": {"type": "string", "default": "", "description": "Expected visible text"},
+                },
+            },
+            handler=browser_verify,
         ),
         Tool(
             name="browser.get_url",
