@@ -24,10 +24,11 @@ async def handle_memory(
     """Handle memory operations."""
     steps.append({"step": "memory", "status": "running"})
 
-    from pengu.memory import MemoryManager, MemoryCategory, MemoryType
+    from pengu.memory import get_memory, MemoryCategory, MemoryType
 
-    memory = MemoryManager()
-    await memory.initialize()
+    memory = get_memory()
+    if not memory._initialized:
+        await memory.initialize()
     text_lower = text.lower()
 
     # Save/remember
@@ -131,10 +132,71 @@ async def handle_memory(
             provider="deterministic", tool_used="memory.clear",
         )
 
+    # Forget/delete
+    elif any(w in text_lower for w in ["forget", "delete", "remove"]):
+        # Try to delete by searching for the topic
+        query_match = None
+        for pattern in [
+            r"forget\s+(?:about\s+)?(.+)",
+            r"delete\s+(?:memory\s+(?:about\s+)?)(.+)",
+            r"remove\s+(?:memory\s+(?:about\s+)?)(.+)",
+        ]:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                query_match = m.group(1).strip()
+                break
+
+        if query_match:
+            results = await memory.search(query_match, limit=10)
+            if results:
+                deleted = 0
+                for entry in results:
+                    if await memory.delete(entry.id):
+                        deleted += 1
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response=f"Forgot {deleted} memor{'y' if deleted == 1 else 'ies'} about '{query_match}'.",
+                    provider="deterministic", tool_used="memory.delete",
+                )
+            else:
+                steps[-1]["status"] = "complete"
+                return PipelineResult(
+                    text=text, intent=intent,
+                    response=f"I don't have any memories about '{query_match}' to forget.",
+                    provider="deterministic", tool_used="memory.delete",
+                )
+        else:
+            steps[-1]["status"] = "error"
+            return PipelineResult(
+                text=text, intent=intent,
+                response="What would you like me to forget?",
+                provider="deterministic",
+            )
+
+    # Recall/what do you know
+    elif any(w in text_lower for w in ["what do you know", "recall", "what did i tell you"]):
+        memories = await memory.list_all(limit=10)
+        if memories:
+            lines = [f"- {r.content} ({r.category.value})" for r in memories]
+            steps[-1]["status"] = "complete"
+            return PipelineResult(
+                text=text, intent=intent,
+                response="Here is what I remember:\n" + "\n".join(lines),
+                provider="deterministic", tool_used="memory.list",
+            )
+        else:
+            steps[-1]["status"] = "complete"
+            return PipelineResult(
+                text=text, intent=intent,
+                response="I don't have any memories stored yet.",
+                provider="deterministic", tool_used="memory.list",
+            )
+
     steps[-1]["status"] = "error"
     return PipelineResult(
         text=text, intent=intent,
-        response="I can help you save, search, list, or clear memories. What would you like to do?",
+        response="I can help you save, search, list, forget, or clear memories. What would you like to do?",
         provider="deterministic",
     )
 

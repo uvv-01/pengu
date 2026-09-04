@@ -119,14 +119,46 @@ class TaskContext:
         """
         Try to resolve a follow-up command by adding context from the session.
 
-        For example:
-          "open downloads" + current_app="explorer"
-          -> "open downloads in file explorer"
+        Resolves:
+          - "open downloads" when in File Explorer
+          - "search for X" when a browser is active
+          - "it" / "that" / "the first one" from recent results
+          - "my browser" from persistent memory preferences
         """
         text_lower = text.lower().strip()
 
         if self.current_app and self.current_app.lower() in text_lower:
             return text
+
+        # Resolve pronouns and references from last action
+        if self.last_result and any(w in text_lower for w in ["it", "that", "them", "there", "this", "the first one", "the second one"]):
+            # If the user says "open it" and we have a last result, substitute
+            if "open" in text_lower and self.last_opened_file:
+                return text_lower.replace("it", self.last_opened_file).replace("that", self.last_opened_file)
+            if "open" in text_lower and self.last_opened_folder:
+                return text_lower.replace("it", self.last_opened_folder).replace("that", self.last_opened_folder)
+
+        # Resolve "my browser" from memory preferences
+        if "my browser" in text_lower or "the browser" in text_lower:
+            try:
+                from pengu.memory import get_memory, MemoryCategory
+                mem = get_memory()
+                if mem._initialized:
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    try:
+                        results = loop.run_until_complete(
+                            mem.search("browser", category=MemoryCategory.PREFERENCE, limit=3)
+                        )
+                        for r in results:
+                            content_lower = r.content.lower()
+                            for app in ["chrome", "edge", "firefox", "opera", "brave"]:
+                                if app in content_lower:
+                                    return text_lower.replace("my browser", app).replace("the browser", app)
+                    finally:
+                        loop.close()
+            except Exception:
+                pass
 
         # Folder navigation follow-ups
         if self.current_app in ("explorer", "File Explorer"):

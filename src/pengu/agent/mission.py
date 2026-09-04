@@ -245,6 +245,28 @@ class MissionManager:
                         break
                     continue
 
+                # Safety check before executing
+                from pengu.safety import get_safety_policy, RiskLevel
+                safety = get_safety_policy()
+                current = state.current_step()
+                classification = safety.check(current.action, current.target)
+
+                if classification.risk_level == RiskLevel.BLOCKED:
+                    current.status = StepStatus.FAILED
+                    current.error = classification.explanation or "Action blocked by safety policy."
+                    state.record_action(current.action, current.target, False,
+                                         error=classification.explanation)
+                    logger.warning("mission_action_blocked", action=current.action,
+                                   target=current.target[:50])
+                    # Skip blocked step and continue
+                    state.advance_step()
+                    continue
+
+                if classification.needs_confirmation:
+                    # Log that confirmation would be needed in voice mode
+                    logger.info("mission_confirmation_needed", action=current.action,
+                               target=current.target[:50], explanation=classification.explanation)
+
                 result = await self._brain.act(state, executor)
                 if self._on_action_complete:
                     self._on_action_complete(state, result)

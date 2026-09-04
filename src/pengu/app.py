@@ -36,6 +36,8 @@ from pengu.voice.engine import VoiceConfig, VoiceEngine, VoiceState
 from pengu.ui.overlay import PenguOverlay, OverlayState
 from pengu.ui.tray import PenguTray, TrayState
 from pengu.hotkey import get_hotkey
+from pengu.safety import get_safety_policy, RiskLevel
+from pengu.scheduler import get_scheduler
 
 logger = get_logger("pengu.app")
 
@@ -563,6 +565,7 @@ class PenguApp:
         self._model_discovery = ModelDiscovery()
         self._provider = None  # LMStudioProvider set after discovery
         self._pipeline = None  # CommandPipeline built after discovery
+        self._pending_confirmation = None  # SafetyPolicy confirmation pending
         self._running = False
 
     async def start(self) -> None:
@@ -617,6 +620,15 @@ class PenguApp:
         else:
             logger.warning("hotkey_registration_failed")
 
+        # Start background scheduler
+        try:
+            scheduler = get_scheduler()
+            import asyncio as _asyncio
+            scheduler_task = _asyncio.ensure_future(scheduler.start())
+            logger.info("scheduler_started")
+        except Exception as e:
+            logger.warning("scheduler_start_failed", error=str(e))
+
         logger.info("pengu_ready", model=self._model_discovery.active_model)
 
         try:
@@ -630,6 +642,12 @@ class PenguApp:
     async def stop(self) -> None:
         """Stop the Pengu application."""
         self._running = False
+        # Stop scheduler
+        try:
+            scheduler = get_scheduler()
+            await scheduler.stop()
+        except Exception:
+            pass
         # Stop hotkey listener
         hotkey = get_hotkey()
         hotkey.stop()
@@ -641,6 +659,28 @@ class PenguApp:
             self._tray.stop()
         if self._provider:
             await self._provider.close()
+
+    def _check_safety(self, action: str, target: str = "") -> Optional[str]:
+        """Check safety policy before executing an action.
+
+        Returns None if safe, or a spoken message if blocked/needs confirmation.
+        """
+        policy = get_safety_policy()
+        classification = policy.check(action, target)
+
+        if classification.risk_level == RiskLevel.BLOCKED:
+            logger.warning("action_blocked", action=action, target=target[:50],
+                          reason=classification.reason)
+            return classification.explanation or "I can't perform that action because it is blocked by the safety policy."
+
+        if classification.needs_confirmation:
+            msg = policy.confirm_action(classification)
+            # For voice, we return the confirmation message and store the pending action
+            self._pending_confirmation = classification
+            logger.info("confirmation_required", action=action, target=target[:50])
+            return msg
+
+        return None
 
     def _process_command(self, text: str) -> Optional[str]:
         """Process a voice command. Returns spoken response.
@@ -659,6 +699,18 @@ class PenguApp:
         if resolved != text:
             logger.info("context_resolved", original=text, resolved=resolved)
             text = resolved
+
+        # Check if this is a confirmation response
+        conf_response = self._handle_confirmation(text)
+        if conf_response is not None:
+            return conf_response
+
+        # Safety check before executing
+        safety_msg = self._check_safety(text, text)
+        if safety_msg:
+            if self._pending_confirmation:
+                return safety_msg
+            return safety_msg
 
         # Try deterministic parser first (fast, covers known apps/folders/git)
         result = self._parser.parse(text)
@@ -732,6 +784,15 @@ class PenguApp:
             return ToolResult(success=False, error=f"Unknown action: {action}")
 
         mission_mgr.set_tool_executor(tool_executor)
+
+        # Safety check before executing agent goal
+        safety_msg = self._check_safety(text, text)
+        if safety_msg:
+            if self._pending_confirmation:
+                # Need confirmation - speak the message and wait
+                return safety_msg
+            # Blocked
+            return safety_msg
 
         def _run_mission():
             new_loop = asyncio.new_event_loop()
@@ -807,6 +868,31 @@ class PenguApp:
             "chat": None,  # Falls through to LLM
         }
         return action_map.get(action)
+
+    def _handle_confirmation(self, text: str) -> Optional[str]:
+        """Handle a yes/no confirmation response."""
+        text_lower = text.lower().strip()
+        confirm_words = ["yes", "yeah", "confirm", "confirmed", "proceed", "do it", "go ahead", "ok", "okay"]
+        deny_words = ["no", "cancel", "stop", "don't", "abort", "nope", "nah"]
+
+        if not self._pending_confirmation:
+            return None
+
+        if any(w in text_lower for w in confirm_words):
+            classification = self._pending_confirmation
+            self._pending_confirmation = None
+            # Grant session permission and return the action to execute
+            policy = get_safety_policy()
+            policy.grant_permission(classification.action, classification.target)
+            logger.info("confirmation_approved", action=classification.action)
+            return None  # Allow execution to continue
+
+        if any(w in text_lower for w in deny_words):
+            self._pending_confirmation = None
+            logger.info("confirmation_denied")
+            return "OK, cancelled."
+
+        return None
 
     def _process_with_pipeline(self, text: str) -> str:
         """Process a command through the full CommandPipeline."""
