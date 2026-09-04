@@ -6,7 +6,7 @@ Falls back to the local LLM only when rules are insufficient.
 
 Categories:
   CHAT, SYSTEM_CONTROL, FILE_OPERATION, CODING, TERMINAL, BROWSER,
-  WEB_SEARCH, VISION, GIT, NETWORK, MEDIA, MEMORY, MULTI_STEP_AGENT
+  WEB_SEARCH, VISION, GIT, NETWORK, MEDIA, MEMORY, MISSIONS, MULTI_STEP_AGENT
 
 Design rule: DETERMINISTIC FIRST.
 Do NOT call an LLM when a regex/keyword can classify the intent.
@@ -357,6 +357,43 @@ NETWORK_RULES: list[Rule] = [
 ]
 
 # Chat patterns (lowest priority — catch-all for conversation)
+
+
+MEMORY_RULES: list[Rule] = [
+    Rule(
+        category=TaskCategory.MEMORY,
+        patterns=_compile([
+            r"\bremember\b",
+            r"\brecall\b",
+            r"\bforget\b",
+            r"\bwhat\s+do\s+you\s+know\b",
+            r"\bmemory\b",
+        ]),
+        action="memory",
+        confidence=0.9,
+        description="Memory operations",
+    ),
+]
+
+MISSIONS_RULES: list[Rule] = [
+    Rule(
+        category=TaskCategory.MISSIONS,
+        patterns=_compile([
+            r"\bremind\b",
+            r"\breminder\b",
+            r"\bschedule\b",
+            r"\bcheck\s+every\b",
+            r"\bwhat\s+are\s+you\s+doing\b",
+            r"\bwhat\s+tasks\b",
+            r"\bcancel\s+(task|mission|reminder)\b",
+            r"\blist\s+(tasks|missions)\b",
+        ]),
+        action="mission",
+        confidence=0.9,
+        description="Mission/scheduler operations",
+    ),
+]
+
 CHAT_RULES: list[Rule] = [
     Rule(
         category=TaskCategory.CHAT,
@@ -395,6 +432,10 @@ ALL_RULES: list[Rule] = (
     + WEB_RULES
     + VISION_RULES
     + NETWORK_RULES
+    + MEMORY_RULES
+    + MISSIONS_RULES
+    + MEMORY_RULES
+    + MISSIONS_RULES
     + CHAT_RULES
 )
 

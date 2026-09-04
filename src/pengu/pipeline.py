@@ -194,6 +194,10 @@ class CommandPipeline:
         elif category == TaskCategory.MEMORY:
             return await self._handle_memory(text, intent, task_id, steps)
 
+        # MISSIONS -> scheduler/mission operations
+        elif category == TaskCategory.MISSIONS:
+            return await self._handle_missions(text, intent, task_id, steps)
+
         # MULTI_STEP_AGENT → LLM for planning
         elif category == TaskCategory.MULTI_STEP_AGENT:
             return await self._handle_with_model(text, intent, task_id, steps, coding=False)
@@ -1258,6 +1262,13 @@ class CommandPipeline:
         """Handle memory operations."""
         from pengu.pipeline_handlers import handle_memory
         return await handle_memory(text, intent, self.tool_registry, steps, PipelineResult)
+
+    async def _handle_missions(
+        self, text: str, intent: Intent, task_id: str, steps: list[dict[str, Any]]
+    ) -> PipelineResult:
+        """Handle mission/scheduler commands."""
+        from pengu.pipeline_handlers import handle_missions
+        return await handle_missions(text, intent, self.tool_registry, steps, PipelineResult)
 
     def _get_offline_chat_response(self, text: str) -> str:
         """Generate a response when no model is available."""

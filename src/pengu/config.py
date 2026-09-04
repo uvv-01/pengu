@@ -71,6 +71,7 @@ class TaskCategory(str, enum.Enum):
     NETWORK = "NETWORK"
     MEDIA = "MEDIA"
     MEMORY = "MEMORY"
+    MISSIONS = "MISSIONS"
     MULTI_STEP_AGENT = "MULTI_STEP_AGENT"
 
 
